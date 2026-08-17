@@ -9,7 +9,7 @@ A fork of [AngeloTadeucci/starforcing-calc](https://github.com/AngeloTadeucci/st
 extended with an equipment/star-range UI overhaul and a budget planner.
 
 - **Upstream:** `AngeloTadeucci/starforcing-calc` (added as the `upstream` remote)
-- **Our branch:** `claude/repo-access-4engky`
+- **Our branch:** `claude/review-and-continue-tqmg1u`
 - **Attribution:** the footer credits upstream, MathBro/serverDiffs, StrategyWiki,
   and contributors. Upstream ships **no LICENSE file** — see "Open question" below.
 
@@ -20,7 +20,7 @@ Zero build step. No `package.json`, no dependencies, no bundler.
 ```bash
 git clone https://github.com/wongsyu/Maplestory-Starforce-Calculator-Enhanced
 cd Maplestory-Starforce-Calculator-Enhanced
-git checkout claude/repo-access-4engky
+git checkout claude/review-and-continue-tqmg1u
 python3 -m http.server 8000
 # app:   http://localhost:8000/index.html
 # tests: http://localhost:8000/test.html
@@ -34,8 +34,9 @@ git fetch upstream && git merge upstream/main
 ```
 
 **Do not add a bundler casually.** `worker.js` uses `importScripts` against
-`window`-attached globals (it aliases `self.window = self` first). A naive
-module migration breaks the worker.
+`window`-attached globals (it aliases `self.window = self` first) and now pulls in
+`optimizer.js` as well as `rates.js`/`simulator.js`. A naive module migration
+breaks the worker.
 
 ## Architecture
 
@@ -48,10 +49,11 @@ Plain IIFEs attaching to `window.SF`. Scripts load in dependency order from
 | `equipment.js` | Level → named gear sets (AbsoLab, Arcane Umbra…) + SVG icons. |
 | `simulator.js` | Core engine: `baseCost`, `costMultiplier`, `applyRateModifiers`, `simulateOnceFast`, `runTrials`, `reachableFloor`. |
 | `optimizer.js` | Closed-form plan metrics, Pareto frontier search, and the sampled budget planner. |
+| `cache.js` | IndexedDB store for sampled odds curves. Degrades to "just compute it". |
 | `fodder.js` | Star-transfer vs raw-tapping comparison. |
 | `app.js` | All DOM. ~1,500 lines. |
-| `worker.js` | Runs `runTrials` off the main thread. |
-| `test.html` | 68 assertions. Open in a browser; look for `FAIL`. |
+| `worker.js` | Off-thread `runTrials` (histogram) and `sampleIndex` (planner curves). |
+| `test.html` | 89 assertions. Open in a browser; look for `FAIL`. |
 
 ### Two engines, deliberately
 
@@ -67,103 +69,73 @@ They agree by construction: both read the same
 
 ### The budget planner (the main new thing)
 
-`sampleIndex()` simulates a plan once and indexes the result: trials bucketed by
-boom count, each bucket's costs sorted. Then
-`P(cost ≤ B AND booms ≤ S) = Σ_{k≤S} |{costs in bucket k ≤ B}| / trials` — a
-binary search per bucket. **One simulation answers every budget**, which is what
-makes the slider live instead of re-simulating per drag.
+`sampleIndex()` simulates a plan once and stores the result as a **budget-per-odds**
+curve: for each boom count `S`, the budget at which each 0.5% odds rung is first
+reached. **One simulation answers every budget**, which is what makes the slider
+live instead of re-simulating per drag.
+
+The transpose is load-bearing, not a detail — read `ODDS-PRECISION.md` before
+touching it. Storing the obvious way round (odds at each budget) bakes in an error
+proportional to the curve's steepness, worst exactly at the elbow where the
+decision gets made; gridding the *bounded* axis instead caps it at half a rung
+(~0.25 pt) everywhere. Measured: 0.13 pt, versus 6.7 pt for the layout it replaced.
 
 On top of that:
 - `envelopeAt/envelopeCurve` — best achievable odds across *all* candidate plans
   at each budget. The plan that wins on a tight budget is genuinely not the one
   that wins on a fat one, so the envelope (not one fixed plan) is the honest curve.
-- `budgetForProb` — bisection inverse: cheapest budget hitting a target %.
+- `budgetForProb` — cheapest budget hitting a target %. A direct read per plan now
+  that the curve is stored on the odds axis; the ladder's targets are all on rungs.
+- `pickContenders` — which plans earn the expensive sampling pass (see below).
 - `findKnee` — elbow detection (max distance from the endpoint chord). This is the
   "stop saving, start tapping" answer.
+
+### Sampling is two-stage, and cached
+
+`app.js → computePlanner` scans all ~24 frontier candidates at 5k trials to find
+which ones top the envelope anywhere, then re-samples only those at 200k. Both
+passes run in `worker.js`. The result goes to IndexedDB keyed on the config plus
+`RATES_VERSION`, so a repeat question is a ~65 ms read rather than an ~8 s compute.
+
+**If you edit `rates.js`, bump `RATES_VERSION`.** A cached curve built from old
+rates is wrong, not merely stale, and the stamp is what stops it being read.
 
 ## Where things stand
 
 Done and pushed:
 
 - Equipment presets with names + icons (replaces the bare level dropdown)
-- Trials slider with margin-of-error readout — **about to be removed, see below**
 - Star range strip in the game's 5-per-group layout, hover shows the number
 - MVP / Event as radio groups instead of selects
 - Budget + spares sliders, odds curve, elbow callout, budget ladder
 - Spare-ceiling warning: when spares (not meso) are the binding constraint,
   unlimited budget still caps out — the curve alone just looks like it flattens
-- Tests 26 → 68
+- **Trials control removed.** Sample size was a Monte Carlo knob wearing a UI
+  costume; the histogram now picks its own count by star range (`autoTrials`), and
+  the planner runs the two-stage pass. The odds readout still shows its ±, because
+  a player is owed the precision even when the sample size isn't theirs to set.
+- **Odds precision reworked** — steps 1–3 of `ODDS-PRECISION.md`. Margin of error
+  on the headline odds went ±1.4 pts → ±0.2 pts.
+- Tests 26 → 89
 
-## Next up: kill the trials parameter
+## Next up
 
-**Decision made:** trials is an implementation detail leaking into the UI. Players
-shouldn't tune a Monte Carlo knob. It's being replaced with precomputed data.
+Nothing is half-finished. The open items, in rough order of value:
 
-### The structural facts that make this tractable
+1. **Tune the trial counts** (`ODDS-PRECISION.md §10.2`). 5k/200k shipped as the
+   design doc's untuned starting points. 100k would still sit under the rate-data
+   ceiling and would halve the ~8 s first run.
+2. **Warm the cache on tab focus** rather than on the button press, so the common
+   case is instant. Costs CPU for players who never open the Optimizer.
+3. **Step 4 — a shipped prewarmed cache.** Deliberately deferred; same format as
+   what `cache.js` already stores, so it can be added without touching the reader.
+   Only worth it once real usage shows which configs are hot.
+4. **Licensing** — see below. Unchanged and still the only item with a deadline
+   that isn't ours to set.
 
-Measured, not assumed — re-derive with the snippets in git history if you doubt them.
-
-1. **Item level collapses to a scalar.**
-   `baseCost = 100·round(mult · levelTier³ · (star+1)^expo / divisor + 10)`.
-   Level enters *only* as `levelTier³`. Verified: rescaling a level-160 sample by
-   `(tier/160)³` reproduces every other level to **0.82% worst case**, ~0.002% at
-   the levels that matter. **One sample serves all item levels.**
-
-2. **MVP and the 30%-off event never touch the random process.** They're pure
-   per-star cost multipliers. If a trial stores cost split into the ≤17 band and
-   the ≥18 band, all 4 MVP tiers × 2 discount states are reconstructible
-   afterward. (Watch out: the safeguard premium is *not* MVP-discounted.)
-
-3. **Only these change the actual random walk:** star catching (2), rate class
-   from the event (3 — none / boom-reduction / 5-10-15 guaranteed), the per-star
-   mode+safeguard plan, and the star range.
-
-So the precompute axes are `(current, target) × rateClass × starCatching` —
-roughly **270 configs** for common play, not the millions a naive cross-product
-suggests.
-
-### Measured costs
-
-| Thing | Number |
-|---|---|
-| `sampleIndex`, 100k trials, 15→22 | 575 ms |
-| `sampleIndex`, 1M trials, 15→22 | 4.5 s |
-| Frontier size, target 22 | 93 plans (of 16,384 evaluated) |
-| Frontier size, target 25 | 141 plans |
-| Margin of error @ 5k trials (today) | ±1.4 pts ← the actual problem |
-| Margin of error @ 100k trials | ±0.31 pts |
-| Margin of error @ 1M trials | ±0.10 pts |
-
-Build estimate at 100k trials/plan: ~54 s per config × 270 ≈ **4 hours
-single-threaded**, well under an hour parallelized. At 1M it's ~31 hours — likely
-not worth it, since ±0.3 pts is already far below what anyone can perceive.
-
-### Proposed shape
-
-Ship the **envelope**, not raw trials. Per config, a grid of
-`budget (64 steps) × spares (0–8)` → `{odds, winningPlanId}`. As `Uint8` pairs
-that's ~1.2 KB per config, ~320 KB raw for 270 configs, ~100 KB gzipped, lazy-loaded.
-
-Store alongside it, for future features: overall cost quantiles (P1–P99), the boom
-distribution P(booms = k), and expected cost/booms. That's the part that makes it
-a reusable dataset rather than a single-purpose cache.
-
-Live simulation stays as the fallback for anything off-table (custom levels,
-unusual ranges), so coverage gaps are a speed issue, never a correctness one.
-
-### Open items on this
-
-- **Regeneration story.** Rates change every patch. The build script needs to be
-  committed with a documented one-liner (`node tools/build-tables.js`) and the
-  table needs a `ratesVersion` stamp so a stale table is detectable at runtime.
-- **Coverage.** Not yet decided — "common paths" (~270 configs) vs a broad sweep
-  (~1,500). Start narrow; the fallback makes this safe to widen later.
-- **Alternative considered:** exact analytic DP over a discretized cost grid
-  (state = star × booms, processed in increasing cost order — the chain is a DAG
-  in cost because every attempt strictly increases it). Zero variance, no data
-  files, covers every config. Rejected for now as delicate (grid resolution
-  becomes its own approximation) but it is the theoretically cleaner answer if
-  the table ever becomes a maintenance burden.
+The analytic DP (exact, zero sampling error) remains documented in
+`ODDS-PRECISION.md §5` as the cleaner answer if sampling ever becomes a burden. It
+was not needed: measured error is now well under the rate data's own uncertainty.
 
 ## Open question: licensing
 
@@ -186,3 +158,6 @@ to an independent host.
   Never hardcode a color; both themes must work.
 - Canvas charts read colors via `cssVar()` and repaint on theme change — if you
   add one, hook it into `redrawHistograms()`.
+- Anything touching `rates.js` bumps `RATES_VERSION`. Cached curves are keyed on it.
+- Don't put a sample size in front of the player. That was the whole point of the
+  precision work; if a number is too noisy, fix the sampling, don't add a knob.

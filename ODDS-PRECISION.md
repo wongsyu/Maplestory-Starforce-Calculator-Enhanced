@@ -4,7 +4,9 @@ Design note. Written after measuring, not before — one of the conclusions
 reverses an earlier proposal in this document's own history, and the measurement
 that caused it is reproduced below so the reversal can be checked.
 
-**Status:** analysis complete, implementation not started.
+**Status:** steps 1–3 implemented; the Trials control is gone. Step 4 stays
+deferred. Measured outcomes are in §8, and §9 records one thing the analysis got
+wrong that only showed up in the building.
 
 ---
 
@@ -70,6 +72,11 @@ Store each trial's cost split into the ≤17 band and the ≥18 band, and all
 > Caveat: the safeguard premium is **not** MVP-discounted. See the comments in
 > `simulator.js → costMultiplier`, which record in-game verification.
 
+> **Superseded — see §9.** This trick needs per-trial cost pairs, and §4's
+> representation deliberately keeps quantiles instead. The two cannot both be had.
+> MVP and the event went into the cache key. §2.1 above is unaffected, because a
+> uniform scalar commutes with quantiles and a per-star multiplier does not.
+
 ### 2.3 What's left
 
 Only these change the actual random process:
@@ -130,7 +137,7 @@ budget at which each probability level is first reached.
 
 In dependency order. Each step is independently valuable.
 
-### Step 1 — Fix the representation
+### Step 1 — Fix the representation ✅ shipped
 
 Change how `sampleIndex` stores its output: quantiles on the probability axis
 instead of raw sorted costs queried at arbitrary budgets.
@@ -138,7 +145,14 @@ instead of raw sorted costs queried at arbitrary budgets.
 No data files, no build step, no download. **Largest accuracy win of the four,
 and the cheapest.**
 
-### Step 2 — Two-stage sampling
+*As built:* `indexSample` in `optimizer.js` emits one row per boom count, each row
+201 budgets on a 0.5% odds grid, plus `ceilings` (P(booms ≤ S), the odds no budget
+can beat) and `tails` (where that ceiling is actually reached — without it the last
+partial step would under-report by up to a full rung). Rows nest, so the union of
+boom buckets is built by incremental merge rather than re-sorting per spare count.
+`probAt` reads it back, `budgetAt` is its inverse.
+
+### Step 2 — Two-stage sampling ✅ shipped
 
 Precision is only needed on plans that actually *win* somewhere on the envelope
 — typically 3–6 of the ~24 candidates.
@@ -149,10 +163,41 @@ Precision is only needed on plans that actually *win* somewhere on the envelope
 Roughly 6 s in a worker, versus ~14 s for a uniform 100k pass over everything,
 and more precise where it counts.
 
-### Step 3 — Cache to IndexedDB, keyed by config
+*As built:* `pickContenders` votes over a 65-budget × 10-spare grid. The cheap pass
+carries its own noise, so a strict argmax would sometimes discard the real winner
+on a coin flip — plans within `1.1 × ` its margin of error are kept too. Plans that
+win a grid point outright are **never** dropped, whatever the cap; only near-misses
+compete for the remaining slots. Both passes run in `worker.js`, which now takes a
+`sample` job alongside the existing histogram `simulate` job.
+
+The fine count tapers by target star, because a trial's cost is nowhere near flat —
+a 25★ climb re-treads its expensive stars after every boom. A flat 200k put 17→25
+at **34 s**; the taper brings it to **14 s**. Each tier is chosen to stay under the
+§6 rate-data ceiling rather than picked for speed, so the taper costs honesty
+nowhere:
+
+| Target | Fine trials | Sampling error |
+|---|---|---|
+| ≤ 22 | 200k | ±0.22 pt |
+| ≤ 24 | 120k | ±0.28 pt |
+| ≤ 26 | 60k | ±0.40 pt |
+| ≥ 27 | 40k | ±0.49 pt |
+
+The readout shows the real figure for the tier it used, so a heavy range says
+±0.4 rather than quietly claiming ±0.2.
+
+### Step 3 — Cache to IndexedDB, keyed by config ✅ shipped
 
 Second time the same question is asked, it is instant. This is
 "compute once, retrieve forever" — just per-user rather than shipped.
+
+*As built:* `cache.js`, keyed on
+`ratesVersion | current | target | level | starCatching | mvp | event | trials`,
+with `RATES_VERSION` now stamped in `rates.js` — bump it on any rate edit and old
+curves stop being read. Entries are capped at 60 and evicted oldest-first; stale
+versions are purged on write. Every entry point resolves rather than rejects, so a
+browser with IndexedDB blocked (private windows, some `file://` setups) silently
+falls back to computing, which is the pre-cache behaviour.
 
 ### Step 4 — *Optionally*, ship a prewarmed cache
 
@@ -269,12 +314,83 @@ console.log("steepest step:", max.toFixed(1), "pts over", (step/1e9).toFixed(1)+
 
 ---
 
-## 8. Open decisions
+## 8. Measured outcome
 
-1. **Proceed with steps 1–3?** Contained change to `optimizer.js` plus a cache
-   layer. Removes the trials control.
-2. **Step 4 at all?** Deferred by design — revisit once usage shows hot configs.
-3. **Trial counts.** 5k coarse / 200k fine are starting points, not tuned.
-4. **Cache invalidation.** Keying on a config hash is straightforward; the hash
-   must include a `ratesVersion` so editing `rates.js` invalidates old entries.
-   Cheap insurance even though rates are stable.
+Validation was run against the three checks the plan asks for — reproducibility,
+interpolation, and accuracy against an independent reference — not just the easy
+one. Config: 15→22, level 160, star catching, safeguarded 15–17 + Mode 4 18–21.
+
+| Check | Method | Result |
+|---|---|---|
+| **Error 2 — interpolation** | table vs a fresh 400k live sim at the **midpoint** of each rung interval (worst case; rungs excluded, they're direct reads) | **0.13 pt** worst, inside the reference sim's own ±0.15 |
+| **Error 1 — bias** | 20 fresh 25k sims at an off-rung budget; judged on the **centre**, not the spread | **+0.024 pt**, inside the ±0.14 band on the mean |
+| **Accuracy** | stored 200k targets re-measured with a 1M-trial reference | **≤0.08 pt** across 50/75/90/95% |
+| Rung round-trip | `probAt(budgetAt(p)) == p` on every rung | exact |
+
+For scale, the rejected budget grid measured **6.7 pt** on the same curve.
+
+End to end in the browser, same config:
+
+| | Before | After |
+|---|---|---|
+| Odds margin of error | ±1.4 pts | **±0.2 pts** (±0.4 on the heaviest ranges) |
+| First run | ~2 s | ~8 s common, 14 s at 17→25 |
+| Repeat run, same config | ~2 s | **65 ms** (cache) |
+| Slider frame | lookup | lookup (2 ms/frame — unchanged) |
+| Ladder row ("budget for 90%?") | 40-step bisection | direct read |
+| Tests | 68 | 89 |
+
+The first run costs more wall clock than before, and that is the intended trade:
+it buys a number that no longer moves when you re-run it, and it is paid once per
+config rather than on every visit.
+
+---
+
+## 9. One thing the analysis got wrong
+
+**§2.2 does not survive Step 1.** The plan to store each trial's cost split into
+the ≤17 and ≥18 bands, and reconstruct all 4 MVP tiers × 2 discount states
+afterward, is incompatible with the transposed representation — and the two are not
+reconcilable by being cleverer.
+
+Recombining bands needs *per-trial* pairs: you rescale each trial's two components,
+add them, and re-sort. Step 1 deliberately throws per-trial data away and keeps
+quantiles. **Two quantile curves cannot be recombined into the quantile curve of
+their weighted sum** — the run that sits at the 60th percentile of low-band cost is
+not the run at the 60th percentile of high-band cost, so adding the curves
+pointwise gives an answer for a run that does not exist.
+
+§2.1 is unaffected, and the difference is exactly why: item level enters as a
+single **uniform** scalar `(tier/160)³` applied to every cost, and a uniform scalar
+*does* commute with quantiles — scale every sample and every quantile scales with
+it. MVP is a *non-uniform* per-star multiplier, and that is what breaks it.
+
+So MVP and the discount event are part of the cache key rather than reconstructed.
+The practical cost is small (a player uses one MVP tier, and the event is on or
+off), and the §2.1 collapse — the one that actually matters for a shipped table —
+still holds. Item level is also in the key today, for a plainer reason: rescaling
+is exact in principle but the cost formula's `round()` makes it approximate in the
+third decimal, and a player uses a handful of levels, not hundreds. If Step 4 is
+ever built, that is where level-collapse earns its keep.
+
+---
+
+## 10. Open decisions
+
+Settled: steps 1–3 are in, and the cache keys on a config hash carrying
+`RATES_VERSION`. What is still open:
+
+1. **Step 4 at all?** Still deferred by design — revisit once usage shows hot
+   configs. The format is identical either way, so nothing is lost by waiting.
+2. **Trial counts.** The taper in §5 was set by the accuracy ceiling, then checked
+   against the clock — not tuned against measured player tolerance. The ≤22 tier
+   could drop to 100k (±0.31 pt, still under the ceiling) and halve the commonest
+   first run. Nobody has established whether 8 s or 4 s is the number that matters.
+3. **Contender margin.** `1.1 ×` the coarse margin of error is a judgement call in
+   the multiplier, even though the base is derived. Too tight risks dropping a
+   winner to noise; too loose wastes fine samples. Worth instrumenting how often
+   the margin actually rescues a plan that goes on to win.
+4. **First-run wait.** 8 s common / 14 s worst is the real cost of the trade.
+   Sampling could start on tab focus rather than on the button, so the common case
+   is warm before the player asks — but that spends CPU on everyone who never
+   presses Optimize.

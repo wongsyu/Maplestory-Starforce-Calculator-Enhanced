@@ -154,38 +154,6 @@
 					</fieldset>
 
 					<fieldset>
-						<div class="legend">Trials</div>
-						<div class="slider-field trials-field">
-							<input
-								type="range"
-								id="trialsSlider"
-								class="slider"
-								min="0"
-								max="6"
-								step="1"
-								value="4"
-								aria-label="Trials"
-								list="trialTicks"
-							/>
-							<datalist id="trialTicks">
-								<option value="0"></option><option value="1"></option><option value="2"></option>
-								<option value="3"></option><option value="4"></option><option value="5"></option>
-								<option value="6"></option>
-							</datalist>
-							<div class="slider-ticks trials-ticks" aria-hidden="true">
-								<span>100</span><span>500</span><span>1k</span><span>5k</span><span>10k</span
-								><span>50k</span><span>100k</span>
-							</div>
-							<div class="trials-readout">
-								<span class="trials-count" id="trialsCount">10,000 runs</span>
-								<span class="trials-moe" id="trialsMoe"></span>
-							</div>
-							<p class="trials-note" id="trialsNote"></p>
-						</div>
-						<input type="hidden" id="trials" value="10000" />
-					</fieldset>
-
-					<fieldset>
 						<div class="legend">Star range</div>
 						<!-- Stars are drawn in the game's own 5-per-row grouping. Click sets the
 						     current star, shift-click (or click past it) sets the target; the
@@ -673,6 +641,7 @@
 		<script src="equipment.js"></script>
 		<script src="simulator.js"></script>
 		<script src="optimizer.js"></script>
+		<script src="cache.js"></script>
 		<script src="fodder.js"></script>
 		<script src="app.js"></script>
 	</body>

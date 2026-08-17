@@ -114,7 +114,14 @@
     ],
   };
 
+  // Stamp for anything that caches results derived from these numbers. The
+  // planner stores sampled odds curves in IndexedDB, and a curve built from old
+  // rates is wrong rather than merely stale — so bump this on *any* edit to the
+  // tables above and old entries stop being read.
+  const RATES_VERSION = "gms-v269-1";
+
   global.GMS_RATES = GMS_RATES;
   global.COST_COEFS = COST_COEFS;
   global.ENHANCE_MODE = ENHANCE_MODE;
+  global.RATES_VERSION = RATES_VERSION;
 })(window);

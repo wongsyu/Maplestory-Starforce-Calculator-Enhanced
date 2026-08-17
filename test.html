@@ -169,15 +169,29 @@
   };
   const idx = SF.optimizer.sampleIndex(pInput, 20000);
   check("planner: sample keeps every trial", idx.trials === 20000);
-  check("planner: buckets total the trial count",
-    idx.buckets.reduce((n, b) => n + b.length, 0) === 20000);
-  check("planner: each bucket is sorted",
-    idx.buckets.every((b) => b.every((v, i) => i === 0 || b[i - 1] <= v)));
+  check("planner: one curve row per reachable boom count",
+    idx.curves.length === idx.maxBooms + 1);
+  check("planner: rungs span 0..100% in 0.5% steps",
+    idx.rungs === 201 && Math.abs(idx.step - 0.005) < 1e-12);
+  // Each row is a budget-per-odds curve, so it must ascend: more odds costs more.
+  check("planner: every curve row ascends",
+    idx.curves.every((row) => row.every((v, i) => i === 0 || row[i - 1] <= v)));
+  // Rows nest — runs staying within S booms are a subset of those within S+1 —
+  // so a higher spare count never needs a bigger budget for the same odds.
+  check("planner: extra spares never cost more",
+    idx.curves.every((row, s) => s === 0 || row.every((v, i) => v <= idx.curves[s - 1][i])));
+  check("planner: ceilings rise to certainty",
+    idx.ceilings[idx.maxBooms] === 1 &&
+    idx.ceilings.every((v, i) => i === 0 || v >= idx.ceilings[i - 1]));
 
   // Zero budget can never finish; a huge budget with unlimited spares always does.
   check("planner: P(0 budget) = 0", SF.optimizer.probAt(idx, 0, 99) === 0);
+  check("planner: P(below cheapest run) = 0",
+    SF.optimizer.probAt(idx, idx.minCost * 0.999, 99) === 0);
   check("planner: P(huge budget, all spares) = 1",
     SF.optimizer.probAt(idx, 1e18, 99) === 1);
+  check("planner: P(infinite budget, all spares) = 1",
+    SF.optimizer.probAt(idx, Infinity, 99) === 1);
 
   // Monotone in both arguments — more meso and more spares can only help.
   let mono = true;
@@ -198,6 +212,36 @@
   check("planner: median cost splits the sample",
     Math.abs(SF.optimizer.probAt(idx, q50, 99) - 0.5) < 0.02);
 
+  // ── The transposed layout ─────────────────────────────────────────────
+  // Odds are stored against a probability grid, not a budget grid, which is what
+  // bounds the interpolation error at half a rung instead of letting it track the
+  // curve's steepness. probAt and budgetAt are inverses, so a round trip through
+  // both must land back on the rung it started from — exactly, since a rung is a
+  // direct read with no interpolation involved.
+  let worstRoundTrip = 0;
+  for (let r = 1; r < 190; r++) {
+    const p = r * idx.step;
+    const b = SF.optimizer.budgetAt(idx, p, 3);
+    if (!isFinite(b)) break;
+    worstRoundTrip = Math.max(worstRoundTrip, Math.abs(SF.optimizer.probAt(idx, b, 3) - p));
+  }
+  check("planner: rungs round-trip exactly (<0.01 pt)", worstRoundTrip < 0.0001);
+
+  // The error that only exists because we store anything at all: between rungs,
+  // probAt interpolates. Probe the midpoint of each interval — the worst case —
+  // and hold it to half a rung. On a budget grid this same measurement was 6.7 pts.
+  let worstInterp = 0;
+  for (let r = 1; r < 190; r++) {
+    const lo = SF.optimizer.budgetAt(idx, r * idx.step, 3);
+    const hi = SF.optimizer.budgetAt(idx, (r + 1) * idx.step, 3);
+    if (!isFinite(lo) || !isFinite(hi)) break;
+    const got = SF.optimizer.probAt(idx, (lo + hi) / 2, 3);
+    // Truth at the midpoint is bracketed by the two rungs it sits between.
+    worstInterp = Math.max(worstInterp,
+      Math.max(r * idx.step - got, got - (r + 1) * idx.step));
+  }
+  check("planner: mid-interval stays inside its rung pair", worstInterp <= 1e-9);
+
   // budgetForProb inverts the envelope: the budget it returns must clear the
   // target, and a shade under it must not. Spares cap the reachable odds no
   // matter the budget (P can never exceed P(booms ≤ spares)), so calibrate the
@@ -206,16 +250,56 @@
   const oneCand = [{ index: idx }];
   const ceiling = SF.optimizer.probAt(idx, Infinity, 3);
   const goal = ceiling - 0.05;
-  const need = SF.optimizer.budgetForProb(oneCand, 3, goal, 1e13);
+  const need = SF.optimizer.budgetForProb(oneCand, 3, goal);
   check("planner: budgetForProb reaches its target",
     need != null && SF.optimizer.probAt(idx, need, 3) >= goal - 1e-9);
   check("planner: budgetForProb is tight",
     need != null && SF.optimizer.probAt(idx, need * 0.98, 3) < goal);
   check("planner: spares cap the odds below 100%", ceiling < 1);
   check("planner: target above the spare ceiling returns null",
-    SF.optimizer.budgetForProb(oneCand, 3, ceiling + 0.01, 1e13) === null);
+    SF.optimizer.budgetForProb(oneCand, 3, ceiling + 0.01) === null);
   check("planner: impossible target returns null",
-    SF.optimizer.budgetForProb(oneCand, 0, 1.5, 1e13) === null);
+    SF.optimizer.budgetForProb(oneCand, 0, 1.5) === null);
+
+  // ── indexSample on hand-built data ────────────────────────────────────
+  // Ten runs, costs 1..10, boom counts 0,1,0,1,... Every quantity is checkable by
+  // hand, which is the point: it pins the layout independently of any simulation.
+  const hCosts = Float64Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  const hBooms = Int32Array.from([0, 1, 0, 1, 0, 1, 0, 1, 0, 1]);
+  const hIdx = SF.optimizer.indexSample(hCosts, hBooms, 1, 10);
+  check("hand: 0-spare ceiling is 50%", hIdx.ceilings[0] === 0.5);
+  check("hand: 1-spare ceiling is 100%", hIdx.ceilings[1] === 1);
+  check("hand: cheapest boom-free run is 1", hIdx.curves[0][0] === 1);
+  // With 0 spares only costs 1,3,5,7,9 count, so 30% odds needs the 3rd of them.
+  check("hand: 30% at 0 spares costs 5", SF.optimizer.budgetAt(hIdx, 0.3, 0) === 5);
+  check("hand: 50% at 0 spares costs 9", SF.optimizer.budgetAt(hIdx, 0.5, 0) === 9);
+  check("hand: above the 0-spare ceiling is unreachable",
+    SF.optimizer.budgetAt(hIdx, 0.6, 0) === Infinity);
+  check("hand: 60% with a spare costs 6", SF.optimizer.budgetAt(hIdx, 0.6, 1) === 6);
+  check("hand: unreachable odds stored as Infinity", hIdx.curves[0][120] === Infinity);
+  check("hand: 0-spare odds cap at the ceiling",
+    SF.optimizer.probAt(hIdx, 1e9, 0) === 0.5);
+
+  // ── Two-stage sampling ────────────────────────────────────────────────
+  // pickContenders decides which plans earn the expensive pass. A plan that tops
+  // the envelope anywhere must survive; one dominated everywhere must not.
+  const cheap = { index: SF.optimizer.indexSample(
+    Float64Array.from([1, 2, 3, 4]), Int32Array.from([0, 0, 3, 3]), 3, 4) };
+  const safe = { index: SF.optimizer.indexSample(
+    Float64Array.from([8, 9, 10, 11]), Int32Array.from([0, 0, 0, 0]), 0, 4) };
+  const dud = { index: SF.optimizer.indexSample(
+    Float64Array.from([20, 21, 22, 23]), Int32Array.from([5, 5, 5, 5]), 5, 4) };
+  const grid = [];
+  for (let b = 1; b <= 25; b++) grid.push(b);
+  const pick = SF.optimizer.pickContenders([cheap, safe, dud], grid, [0, 1, 2], 0.015, 10);
+  check("contenders: the cheap plan wins somewhere", pick.keep.includes(0));
+  check("contenders: the safe plan wins somewhere", pick.keep.includes(1));
+  check("contenders: a dominated plan is dropped", !pick.keep.includes(2));
+  check("contenders: reports what it dropped", pick.dropped === 1 && pick.winners === 2);
+  // Never drop a real winner just because the cap is small.
+  const tight = SF.optimizer.pickContenders([cheap, safe, dud], grid, [0, 1, 2], 0.015, 1);
+  check("contenders: cap spares outright winners",
+    tight.keep.includes(0) && tight.keep.includes(1));
 
   // findKnee on a synthetic concave curve must land in the bend, and must
   // decline to invent one on a straight line.

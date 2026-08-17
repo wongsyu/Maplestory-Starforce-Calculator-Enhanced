@@ -249,11 +249,103 @@
   // ── Budget planning ─────────────────────────────────────────────────────
   // successProb() answers one (budget, spares) question per simulation, which is
   // fine for a button but hopeless behind a slider. Instead sample the *joint*
-  // (cost, booms) distribution once and index it: bucket the trials by boom
-  // count, sort each bucket's costs, and P(cost ≤ B AND booms ≤ S) becomes
-  //     Σ_{k≤S} |{ costs in bucket k that are ≤ B }| / trials
-  // — a binary search per bucket. One pass then answers every budget the player
-  // can drag to, in microseconds, which is what makes the curve live.
+  // (cost, booms) distribution once and keep it, so every budget the player can
+  // drag to is a lookup rather than a fresh simulation.
+  //
+  // The sample is stored **transposed**: not "odds at each budget" but "budget at
+  // each odds level", on a fixed grid of 0.5% rungs. That choice carries the whole
+  // accuracy story, so it's worth stating why.
+  //
+  // Keeping a sample at all means gridding some axis and interpolating between
+  // the grid points. Grid the *budget* axis evenly and the interpolation error is
+  // proportional to how steep the curve is between two points — and this curve is
+  // near-vertical exactly at the elbow, where the save-or-tap decision is made. A
+  // 64-step grid over a 0–79B range misses by up to 6.7 points there, five times
+  // the ±1.4 pt sampling noise it would be meant to fix, and no number of trials
+  // shrinks it.
+  //
+  // Transposing removes that error rather than correcting it. Probability is
+  // bounded to [0, 1], so an even grid on *that* axis is complete, and the worst
+  // interpolation error is half a rung — ~0.25 points, everywhere, whatever the
+  // curve does. Equal steps in odds map to tiny steps in budget wherever the curve
+  // is steep, so resolution bunches up at the elbow for free. It also makes the
+  // question players actually ask ("what budget gets me to 90%?") a direct read,
+  // since 90% is itself a rung.
+
+  // 0.5% rungs: 0%, 0.5%, … 100%. Half a rung (~0.25 pt) is already well under the
+  // ±0.5 pt uncertainty in the community-measured rates themselves, so a finer
+  // grid would only compute a wrong number more precisely.
+  const ODDS_STEP = 0.005;
+  const ODDS_RUNGS = 201;
+
+  // Turn raw (cost, booms) trial results into the transposed grid. Split out from
+  // sampleIndex so the layout can be tested against hand-built samples.
+  //
+  // Rows are nested by construction — the runs that stay within S booms are a
+  // subset of those within S+1 — so the union is built incrementally by merging
+  // one boom bucket in at a time, rather than re-sorting per spare count.
+  function indexSample(costs, booms, maxBooms, trials) {
+    const counts = new Int32Array(maxBooms + 1);
+    for (let i = 0; i < trials; i++) counts[booms[i]]++;
+    const byBooms = [];
+    for (let k = 0; k <= maxBooms; k++) byBooms.push(new Float64Array(counts[k]));
+    const fill = new Int32Array(maxBooms + 1);
+    for (let i = 0; i < trials; i++) {
+      const k = booms[i];
+      byBooms[k][fill[k]++] = costs[i];
+    }
+    // Comparator-free sort on a typed array: numeric ascending, and fast.
+    byBooms.forEach((b) => b.sort());
+
+    const curves = [];
+    const ceilings = new Float64Array(maxBooms + 1);
+    const tails = new Float64Array(maxBooms + 1);
+    // The running union of buckets 0..S, and a scratch buffer to merge into.
+    let cum = new Float64Array(trials);
+    let scratch = new Float64Array(trials);
+    let cumLen = 0;
+
+    for (let S = 0; S <= maxBooms; S++) {
+      const add = byBooms[S];
+      let i = 0;
+      let j = 0;
+      let o = 0;
+      while (i < cumLen && j < add.length)
+        scratch[o++] = cum[i] <= add[j] ? cum[i++] : add[j++];
+      while (i < cumLen) scratch[o++] = cum[i++];
+      while (j < add.length) scratch[o++] = add[j++];
+      const swap = cum;
+      cum = scratch;
+      scratch = swap;
+      cumLen = o;
+
+      const row = new Float64Array(ODDS_RUNGS).fill(Infinity);
+      // Rung 0 anchors the curve at probability zero: the cheapest run that stays
+      // within S booms. No budget below it finishes at all.
+      row[0] = cumLen ? cum[0] : Infinity;
+      for (let r = 1; r < ODDS_RUNGS; r++) {
+        const need = Math.ceil(r * ODDS_STEP * trials);
+        // Odds above P(booms ≤ S) are unreachable at any budget; those rungs stay
+        // Infinity and `ceilings` records where the curve actually stops.
+        if (need > cumLen) break;
+        row[r] = cum[need - 1];
+      }
+      curves.push(row);
+      ceilings[S] = cumLen / trials;
+      tails[S] = cumLen ? cum[cumLen - 1] : Infinity;
+    }
+
+    return {
+      trials,
+      maxBooms,
+      step: ODDS_STEP,
+      rungs: ODDS_RUNGS,
+      curves,
+      ceilings,
+      tails,
+      minCost: curves[maxBooms][0],
+    };
+  }
 
   // Sample a plan and index it in one pass.
   function sampleIndex(input, trials) {
@@ -262,53 +354,72 @@
       input.itemLevel,
       planOpts(input),
     );
-    const costs = [];
-    const booms = [];
+    const costs = new Float64Array(trials);
+    const booms = new Int32Array(trials);
     let maxBooms = 0;
     for (let i = 0; i < trials; i++) {
       const t = SF.simulateOnceFast(input.currentStar, input.targetStar, tables);
-      costs.push(t.totalCost);
-      booms.push(t.booms);
+      costs[i] = t.totalCost;
+      booms[i] = t.booms;
       if (t.booms > maxBooms) maxBooms = t.booms;
     }
-    const buckets = [];
-    for (let k = 0; k <= maxBooms; k++) buckets.push([]);
-    for (let i = 0; i < trials; i++) buckets[booms[i]].push(costs[i]);
-    buckets.forEach((b) => b.sort((x, y) => x - y));
-
-    const sorted = costs.slice().sort((a, b) => a - b);
-    return {
-      trials,
-      maxBooms,
-      buckets: buckets.map((b) => Float64Array.from(b)),
-      sortedCosts: Float64Array.from(sorted),
-    };
+    return indexSample(costs, booms, maxBooms, trials);
   }
 
-  // Count of entries ≤ v in a sorted Float64Array (upper bound).
-  function countAtMost(arr, v) {
-    let lo = 0;
-    let hi = arr.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (arr[mid] <= v) lo = mid + 1;
-      else hi = mid;
-    }
-    return lo;
-  }
-
+  // Odds at a budget — reading the transposed curve back. Lands on a rung and
+  // it's a direct read; between rungs it interpolates, which is where the ~0.25 pt
+  // worst case lives.
   function probAt(index, budget, spares) {
-    const top = Math.min(spares, index.maxBooms);
-    let ok = 0;
-    for (let k = 0; k <= top; k++) ok += countAtMost(index.buckets[k], budget);
-    return ok / index.trials;
+    const S = Math.min(spares, index.maxBooms);
+    const row = index.curves[S];
+    const ceiling = index.ceilings[S];
+    // Also catches NaN and the all-Infinity row of a spare count that never finishes.
+    if (!(budget >= row[0])) return 0;
+
+    // Highest rung this budget affords. Rungs past the ceiling hold Infinity, which
+    // compares false against any finite budget, so the search stops there by itself.
+    let lo = 0;
+    let hi = index.rungs - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (row[mid] <= budget) lo = mid;
+      else hi = mid - 1;
+    }
+
+    const p = lo * index.step;
+    if (p >= ceiling) return ceiling;
+    // Interpolate toward the next rung — or toward the ceiling itself, when this is
+    // the last rung the sample reached and the remainder is a partial step.
+    const nextP = Math.min(p + index.step, ceiling);
+    const nextB =
+      lo + 1 < index.rungs && row[lo + 1] < Infinity ? row[lo + 1] : index.tails[S];
+    if (!(nextB > row[lo])) return nextP;
+    return Math.min(
+      p + ((budget - row[lo]) / (nextB - row[lo])) * (nextP - p),
+      ceiling,
+    );
   }
 
+  // The budget one plan needs to reach `prob` — the read the transposed layout
+  // exists for. Infinity when spares, not meso, are the binding constraint.
+  function budgetAt(index, prob, spares) {
+    const S = Math.min(spares, index.maxBooms);
+    if (prob > index.ceilings[S] + 1e-12) return Infinity;
+    const row = index.curves[S];
+    const x = Math.max(0, Math.min(index.rungs - 1, prob / index.step));
+    const r = Math.floor(x);
+    if (row[r] === Infinity) return Infinity;
+    if (r >= index.rungs - 1) return row[index.rungs - 1];
+    const at = row[r];
+    const next = row[r + 1] < Infinity ? row[r + 1] : index.tails[S];
+    return at + (x - r) * (next - at);
+  }
+
+  // Cost quantile ignoring booms: the q-th rung of the unlimited-spares row.
   function quantile(index, q) {
-    const a = index.sortedCosts;
-    if (a.length === 0) return 0;
-    const i = Math.min(a.length - 1, Math.max(0, Math.round(q * (a.length - 1))));
-    return a[i];
+    const row = index.curves[index.maxBooms];
+    const r = Math.min(index.rungs - 1, Math.max(0, Math.round(q / index.step)));
+    return row[r];
   }
 
   // Best achievable odds at (budget, spares) across every candidate plan, plus
@@ -333,18 +444,71 @@
     });
   }
 
-  // Cheapest budget that still reaches `target` odds, by bisection on the
-  // envelope (monotone non-decreasing in budget, so bisection is exact to `tol`).
-  function budgetForProb(indexed, spares, target, hiHint) {
-    let lo = 0;
-    let hi = hiHint;
-    if (envelopeAt(indexed, hi, spares).prob < target) return null;
-    for (let i = 0; i < 40; i++) {
-      const mid = (lo + hi) / 2;
-      if (envelopeAt(indexed, mid, spares).prob >= target) hi = mid;
-      else lo = mid;
+  // Cheapest budget that still reaches `target` odds anywhere on the envelope.
+  // The envelope reaches the target exactly when its cheapest plan does, so this
+  // is a min over direct reads — the bisection the old budget-keyed layout needed
+  // is gone, and so is its tolerance. null means no budget gets there: spares are
+  // the binding constraint.
+  function budgetForProb(indexed, spares, target) {
+    let best = Infinity;
+    for (let i = 0; i < indexed.length; i++) {
+      const b = budgetAt(indexed[i].index, target, spares);
+      if (b < best) best = b;
     }
-    return hi;
+    return best < Infinity ? best : null;
+  }
+
+  // Which plans deserve the expensive sampling pass. Only a plan that tops the
+  // envelope somewhere is ever shown, so precision spent on the rest buys nothing
+  // — typically 3–6 of the ~24 candidates matter. Sampling everything to the same
+  // depth is brute force; this is the same precision aimed better.
+  //
+  // The catch is that the cheap pass used to pick winners is itself noisy, so a
+  // strict argmax would sometimes drop a real winner over sampling scatter. Plans
+  // within `margin` of the leader are kept too. Outright winners are never
+  // dropped; only the near-misses compete for the remaining slots.
+  function pickContenders(indexed, budgets, sparesList, margin, cap) {
+    const n = indexed.length;
+    const wins = new Int32Array(n);
+    // Best shortfall against the leader across the grid: 0 where a plan led.
+    const closeness = new Float64Array(n).fill(-Infinity);
+    const probs = new Float64Array(n);
+
+    for (let si = 0; si < sparesList.length; si++) {
+      for (let bi = 0; bi < budgets.length; bi++) {
+        let best = -1;
+        let bestI = -1;
+        for (let i = 0; i < n; i++) {
+          const p = probAt(indexed[i].index, budgets[bi], sparesList[si]);
+          probs[i] = p;
+          if (p > best) {
+            best = p;
+            bestI = i;
+          }
+        }
+        // A budget nothing can finish on ranks every plan equally at zero; it says
+        // nothing about which plan is better, so it gets no vote.
+        if (best <= 0) continue;
+        wins[bestI]++;
+        for (let i = 0; i < n; i++)
+          if (probs[i] - best > closeness[i]) closeness[i] = probs[i] - best;
+      }
+    }
+
+    const order = [];
+    for (let i = 0; i < n; i++) order.push(i);
+    order.sort((a, b) => wins[b] - wins[a] || closeness[b] - closeness[a]);
+    const winners = order.filter((i) => wins[i] > 0);
+    const near = order.filter((i) => wins[i] === 0 && closeness[i] >= -margin);
+    const kept = winners.concat(near.slice(0, Math.max(0, cap - winners.length)));
+    // Degenerate grids (every budget below the cheapest run) leave nobody standing;
+    // fall back to the cheapest plan so the planner still has something to show.
+    if (kept.length === 0 && n) kept.push(0);
+    return {
+      keep: kept.sort((a, b) => a - b),
+      winners: winners.length,
+      dropped: n - kept.length,
+    };
   }
 
   // Diminishing-returns point: the curve point furthest from the straight chord
@@ -382,12 +546,17 @@
     planMetrics,
     optimizeFrontier,
     successProb,
+    indexSample,
     sampleIndex,
     probAt,
+    budgetAt,
     quantile,
+    ODDS_STEP,
+    ODDS_RUNGS,
     envelopeAt,
     envelopeCurve,
     budgetForProb,
+    pickContenders,
     findKnee,
   };
 })(window);

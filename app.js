@@ -97,12 +97,27 @@
     return parseInt($("itemLevel").value, 10);
   }
 
+  // How many runs the histogram is built from. This used to be a slider, and it
+  // shouldn't have been: sample size is a Monte Carlo implementation detail, and
+  // the only thing a player could tell from turning it up was that the bar took
+  // longer. Picked here instead, and tapered by range because a 30★ trial costs
+  // roughly a hundred times a 20★ one — a flat count would make the cheap ranges
+  // needlessly coarse or the dear ones interminable.
+  function autoTrials(targetStar) {
+    if (targetStar <= 20) return 200000;
+    if (targetStar <= 22) return 100000;
+    if (targetStar <= 24) return 50000;
+    if (targetStar <= 26) return 20000;
+    return 10000;
+  }
+
   function readInputs() {
+    const targetStar = parseInt($("targetStar").value, 10);
     const input = {
       itemLevel: readItemLevel(),
       currentStar: parseInt($("currentStar").value, 10),
-      targetStar: parseInt($("targetStar").value, 10),
-      trials: parseInt($("trials").value, 10),
+      targetStar,
+      trials: autoTrials(targetStar),
       mvp: $("mvp").value,
       event: $("event").value,
       starCatching: $("starCatching").checked,
@@ -135,12 +150,6 @@
       return "Target ★ must be between 1 and 30.";
     if (input.targetStar <= input.currentStar)
       return "Target ★ must be greater than Current ★.";
-    if (
-      !Number.isFinite(input.trials) ||
-      input.trials < 1 ||
-      input.trials > 100000
-    )
-      return "Trials must be between 1 and 100000.";
     return null;
   }
 
@@ -359,7 +368,60 @@
         fallback();
       };
 
-      worker.postMessage(input);
+      worker.postMessage({ type: "simulate", input });
+    });
+  }
+
+  // Same worker, different job: build the planner's odds curves for a list of
+  // plans. The fine pass is ~200k trials each — seconds of solid CPU — so it has
+  // to be off the main thread. Falls back in-page for the same reasons
+  // runSimulation does, yielding between plans so the label still repaints.
+  function sampleInWorker(jobs, trials, onProgress) {
+    const inPage = async () => {
+      const out = [];
+      for (let i = 0; i < jobs.length; i++) {
+        out.push(SF.optimizer.sampleIndex(jobs[i].input, trials));
+        onProgress(i + 1, jobs.length);
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      return out;
+    };
+
+    return new Promise((resolve) => {
+      let worker;
+      try {
+        worker = new Worker("worker.js");
+      } catch (e) {
+        inPage().then(resolve);
+        return;
+      }
+
+      let settled = false;
+      const fallback = () => {
+        if (settled) return;
+        settled = true;
+        try {
+          worker.terminate();
+        } catch (e) {}
+        inPage().then(resolve);
+      };
+
+      worker.onmessage = (e) => {
+        const msg = e.data;
+        if (msg.type === "progress") {
+          onProgress(msg.done, msg.total);
+        } else if (msg.type === "sampled") {
+          settled = true;
+          worker.terminate();
+          resolve(msg.indexes);
+        }
+      };
+      worker.onerror = (err) => {
+        if (err && err.preventDefault) err.preventDefault();
+        fallback();
+      };
+
+      worker.postMessage({ type: "sample", jobs, trials });
     });
   }
 
@@ -499,38 +561,12 @@
     $("eqSets").textContent = preset ? SF.equipment.setsLabel(preset) : "custom level";
   }
 
-  // ── Trials slider ───────────────────────────────────────────────────────
-
-  const TRIAL_STEPS = [100, 500, 1000, 5000, 10000, 50000, 100000];
-
   // Half-width of the 95% confidence interval on a probability, in percentage
-  // points, at its widest (p = 0.5). This is the number that tells a player how
-  // much to trust the result, and it is the whole reason the slider shows more
-  // than a raw trial count.
+  // points, at its widest (p = 0.5). Still reported next to the odds — a player
+  // is owed the precision of the answer even though the sample size behind it is
+  // no longer theirs to set.
   function marginOfError(n) {
     return (1.96 * Math.sqrt(0.25 / n)) * 100;
-  }
-
-  function syncTrials() {
-    const n = TRIAL_STEPS[parseInt($("trialsSlider").value, 10)] || 10000;
-    $("trials").value = String(n);
-    $("trialsCount").textContent = n.toLocaleString("en-US") + " runs";
-
-    const moe = marginOfError(n);
-    $("trialsMoe").textContent = `±${moe.toFixed(moe < 1 ? 2 : 1)} pts`;
-
-    // Spell the interval out. "±1 percentage point" means nothing to most
-    // players; "a 50% reading really means 49–51%" does.
-    const lo = (50 - moe).toFixed(0);
-    const hi = (50 + moe).toFixed(0);
-    const speed =
-      n >= 50000
-        ? " Slow to run, but the number stops wobbling between runs."
-        : n <= 500
-          ? " Instant, but re-running will visibly change the answer."
-          : "";
-    $("trialsNote").textContent =
-      `A result near 50% is really somewhere in ${lo}–${hi}%.` + speed;
   }
 
   // ── Star range strip ────────────────────────────────────────────────────
@@ -816,6 +852,42 @@
   }
 
   // ── Optimize tab ────────────────────────────────────────────────────────
+
+  // Two-stage sampling: a cheap scan over every candidate to find which plans top
+  // the envelope, then a deep pass on just those.
+  //
+  // The fine count tapers by range because a trial's cost is nothing like flat — a
+  // 25★ climb re-treads its expensive stars after every boom and runs orders of
+  // magnitude longer than a 20★ one, so a single count either makes cheap ranges
+  // needlessly coarse or dear ones unusable (a flat 200k put 17→25 at 34 seconds).
+  //
+  // The taper is bounded by accuracy, not guessed: every tier below stays at or
+  // under ~±0.5 pts, which is the uncertainty in the community-measured rates
+  // themselves. Buying precision past that computes a wrong number more precisely,
+  // so even the cheapest range deliberately stops short of what it could afford.
+  //   200k → ±0.22    120k → ±0.28    60k → ±0.40    40k → ±0.49
+  function plannerTrials(targetStar) {
+    if (targetStar <= 22) return { coarse: 5000, fine: 200000 };
+    if (targetStar <= 24) return { coarse: 5000, fine: 120000 };
+    if (targetStar <= 26) return { coarse: 2500, fine: 60000 };
+    return { coarse: 2500, fine: 40000 };
+  }
+
+  // Spare counts the planner can actually be asked about: the slider's 0–8, plus
+  // 9 because the spare-ceiling note compares against "one more spare".
+  const CONTENDER_SPARES = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+  // Ceiling on near-misses only — plans that win a grid point outright are always
+  // sampled, however many there are, so this can never drop a real winner.
+  const MAX_CONTENDERS = 10;
+
+  // How close to the leader still counts as a contender. Derived from the cheap
+  // pass's own noise rather than fixed, since that noise moves with the taper
+  // above: at 5k it's ±1.4 pts, at 2.5k ±2.0. A margin under it would discard real
+  // winners on a coin flip.
+  function contenderMargin(coarseTrials) {
+    return (1.1 * marginOfError(coarseTrials)) / 100;
+  }
+
   // Modifiers the optimizer scores against — the same form inputs the matrix
   // reads, minus the global mode/safeguard (the plan supplies those per star).
   function readOptBaseOpts() {
@@ -894,40 +966,37 @@
     const opts = readOptBaseOpts();
     const params = { currentStar, targetStar, itemLevel, opts };
 
-    // Sample each frontier plan once and keep the indexed (cost, booms) joint
-    // distribution. Every budget/spares question the player can ask afterwards
-    // is a lookup against these samples, so the sliders answer instantly rather
-    // than kicking off a fresh simulation per drag.
+    // Sample each plan once and keep the odds curve. Every budget/spares question
+    // the player can ask afterwards is a lookup against those curves, so the
+    // sliders answer instantly rather than kicking off a simulation per drag.
     const btn = $("optimizeBtn");
     const label = btn.textContent;
     btn.disabled = true;
     btn.classList.add("is-running");
     try {
-      const fr = SF.optimizer.optimizeFrontier(params, 24);
-      // Heavier ranges (toward 30★) get fewer trials so the sweep stays snappy.
-      const trials = targetStar <= 24 ? 5000 : 2500;
-      const indexed = [];
-      for (let i = 0; i < fr.candidates.length; i++) {
-        const cand = fr.candidates[i];
-        const input = Object.assign(
-          { currentStar, targetStar, itemLevel, starPlan: cand.plan },
-          opts,
-        );
-        indexed.push({
-          plan: cand.plan,
-          expCost: cand.expCost,
-          expBooms: cand.expBooms,
-          index: SF.optimizer.sampleIndex(input, trials),
-        });
-        btn.textContent = `Optimizing ${i + 1} / ${fr.candidates.length}`;
-        // Yield so the button text repaints between candidates.
-        await new Promise((r) => setTimeout(r, 0));
+      const key = SF.cache.configKey({
+        currentStar,
+        targetStar,
+        itemLevel,
+        starCatching: opts.starCatching,
+        mvp: opts.mvp,
+        event: opts.event,
+        trials: plannerTrials(targetStar).fine,
+      });
+
+      btn.textContent = "Checking…";
+      let result = await SF.cache.get(key);
+      if (!result) {
+        result = await computePlanner(params, btn);
+        // Fire and forget: a cache write failing is not a reason to hold up the
+        // answer, and every path in cache.js resolves rather than throws.
+        SF.cache.put(key, result);
       }
 
       planner = {
-        indexed,
-        trials,
-        frontierSize: fr.frontierSize,
+        indexed: result.indexed,
+        trials: result.trials,
+        frontierSize: result.frontierSize,
         currentStar,
         targetStar,
         itemLevel,
@@ -940,6 +1009,78 @@
       btn.classList.remove("is-running");
       btn.textContent = label;
     }
+  }
+
+  // Two-stage sampling. Precision only matters on plans that actually top the
+  // envelope somewhere — typically a handful of the 24 candidates — so scan them
+  // all cheaply to find those, then spend the real trials on the survivors.
+  // Sampling everything to the same depth would cost roughly twice the wall clock
+  // for a less precise answer where it counts.
+  async function computePlanner(params, btn) {
+    const { currentStar, targetStar, itemLevel, opts } = params;
+    const { coarse: coarseTrials, fine: fineTrials } = plannerTrials(targetStar);
+    const fr = SF.optimizer.optimizeFrontier(params, 24);
+    const jobs = fr.candidates.map((c) => ({
+      input: Object.assign(
+        { currentStar, targetStar, itemLevel, starPlan: c.plan },
+        opts,
+      ),
+    }));
+
+    btn.textContent = "Scanning plans…";
+    const coarse = await sampleInWorker(jobs, coarseTrials, (done, total) => {
+      btn.textContent = `Scanning ${done} / ${total}`;
+    });
+    const scanned = fr.candidates.map((c, i) => ({
+      plan: c.plan,
+      expCost: c.expCost,
+      expBooms: c.expBooms,
+      index: coarse[i],
+    }));
+
+    const picked = SF.optimizer.pickContenders(
+      scanned,
+      contenderBudgets(scanned),
+      CONTENDER_SPARES,
+      contenderMargin(coarseTrials),
+      MAX_CONTENDERS,
+    );
+
+    btn.textContent = "Refining…";
+    const fine = await sampleInWorker(
+      picked.keep.map((i) => jobs[i]),
+      fineTrials,
+      (done, total) => {
+        btn.textContent = `Refining ${done} / ${total}`;
+      },
+    );
+
+    return {
+      indexed: picked.keep.map((ci, j) => ({
+        plan: fr.candidates[ci].plan,
+        expCost: fr.candidates[ci].expCost,
+        expBooms: fr.candidates[ci].expBooms,
+        index: fine[j],
+      })),
+      trials: fineTrials,
+      frontierSize: fr.frontierSize,
+      contenders: picked.keep.length,
+      winners: picked.winners,
+    };
+  }
+
+  // The grid the cheap pass votes on. It spans the same budgets the planner's
+  // slider will cover, so a plan that tops the envelope nowhere here tops it
+  // nowhere the player can actually look.
+  function contenderBudgets(indexed) {
+    const lo = indexed.reduce((m, c) => Math.min(m, c.index.minCost), Infinity);
+    const hi = indexed.reduce(
+      (m, c) => Math.max(m, SF.optimizer.quantile(c.index, 0.995)),
+      0,
+    );
+    const out = [];
+    for (let i = 0; i <= 64; i++) out.push(lo + ((hi - lo) * i) / 64);
+    return out;
   }
 
   // ── Budget planner ──────────────────────────────────────────────────────
@@ -956,7 +1097,7 @@
   // cheapest run seen up to a budget that all but guarantees a finish.
   function setupPlannerRanges() {
     const cheapest = planner.indexed.reduce(
-      (m, c) => Math.min(m, c.index.sortedCosts[0]),
+      (m, c) => Math.min(m, c.index.minCost),
       Infinity,
     );
     const generous = planner.indexed.reduce(
@@ -1121,12 +1262,13 @@
   // A few round budgets with what each one buys, so the trade is legible without
   // reading the curve pixel by pixel.
   function renderLadder(spares, budget) {
+    // Every one of these lands exactly on a stored 0.5% rung, so each row is a
+    // direct read off the curve rather than a search for it.
     const targets = [0.5, 0.75, 0.9, 0.95, 0.99];
-    const s = $("optBudgetSlider");
-    const hi = parseFloat(s.max) * 1e9;
     const rows = targets
       .map((t) => {
-        const need = SF.optimizer.budgetForProb(planner.indexed, spares, t, hi);
+        const need = SF.optimizer.budgetForProb(planner.indexed, spares, t);
+        // null now means genuinely unreachable — spares, not meso, are binding.
         if (need == null) {
           return `<tr class="ladder-row--out"><td>${(t * 100).toFixed(0)}%</td>
             <td class="num">out of reach</td><td class="num">—</td></tr>`;
@@ -1319,8 +1461,9 @@
       "</div>";
 
     // The odds headline lives above the chart now, so this note only has to
-    // explain where the plan came from.
-    let note = `<p class="opt-note">Best plan at ${fmtMesos(budgetMesos)}, picked from ${ctx.frontierSize} cost/boom-efficient candidates, ${ctx.trials.toLocaleString("en-US")} trials each.</p>`;
+    // explain where the plan came from. Trial counts stay out of it — sample size
+    // is our problem, and the ± on the headline already says what it bought.
+    let note = `<p class="opt-note">Best plan at ${fmtMesos(budgetMesos)}, picked from ${ctx.frontierSize} cost/boom-efficient candidates.</p>`;
     // When even the best plan rarely finishes, the constraints — not the plan —
     // are the problem; say so rather than presenting a long-shot as "optimal".
     if (ctx.prob < 0.5) {
@@ -1606,9 +1749,6 @@
       if (Number.isFinite(v)) setItemLevel(v, { fromCustom: true });
     });
 
-    // Trials slider.
-    $("trialsSlider").addEventListener("input", syncTrials);
-
     // Star strip.
     buildStarStrip();
     $("starStrip").addEventListener("click", onStarClick);
@@ -1698,7 +1838,6 @@
     applyTheme(currentTheme(), false);
 
     syncEquipment();
-    syncTrials();
     syncStarStrip();
     syncEnhanceMode();
     syncBoomTable();

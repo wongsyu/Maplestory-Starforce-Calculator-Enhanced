@@ -1526,9 +1526,12 @@ th[data-mode-col].active-mode-col {
   color: var(--accent);
 }
 
+.star-cell.is-gain svg {
+  opacity: 0.4;
+}
+
 .star-cell.is-gain {
   color: var(--accent);
-  opacity: 0.4;
 }
 
 .star-cell.is-target {
@@ -1856,4 +1859,41 @@ th[data-mode-col].active-mode-col {
   font-family: var(--mono);
   font-weight: 500;
   color: var(--text);
+}
+
+/* Hover/focus tooltip on each star: the number you need, only when you're
+   pointing at it — 30 permanent labels would drown the strip. */
+.star-cell {
+  position: relative;
+}
+
+.star-cell::after {
+  content: attr(data-star) "★";
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 6px;
+  background: var(--panel-head);
+  border: 1px solid var(--border-hover-strong);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s;
+  z-index: 5;
+}
+
+.star-cell:hover::after,
+.star-cell:focus-visible::after {
+  opacity: 1;
+}
+
+/* The strip's own row needs headroom so the tooltip isn't clipped. */
+.star-strip {
+  padding-top: 20px;
 }

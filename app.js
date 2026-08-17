@@ -546,8 +546,10 @@
       html += '<span class="star-group">';
       for (let k = 1; k <= 5; k++) {
         const i = g * 5 + k;
+        // data-star drives the CSS hover tooltip, so the number is one hover
+        // away without spending permanent screen space on 30 labels.
         html += `<button type="button" class="star-cell" data-star="${i}"
-          aria-label="Star ${i}"><svg viewBox="0 0 24 24" width="15" height="15"
+          aria-label="Set star ${i}"><svg viewBox="0 0 24 24" width="15" height="15"
           aria-hidden="true"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.4-5.8-3-5.8 3
           1.1-6.4L2.6 9.4l6.5-.9L12 2.6z"/></svg></button>`;
       }

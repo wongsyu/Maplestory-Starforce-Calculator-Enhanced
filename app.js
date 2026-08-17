@@ -17,6 +17,10 @@
   // The plan produced by the last Optimize run, held so "Apply to Per-star
   // matrix" can write it into the editable matrix.
   let lastOptimizedPlan = null;
+  // Sampled candidate plans from the last Optimize run, held so the budget and
+  // spares sliders can re-query them without re-simulating. Null = no run yet.
+  let planner = null;
+  let lastPlanIdx = -1;
   // Stats from the last simulation, held so the histograms (canvas pixels, not
   // CSS) can be redrawn when the theme changes.
   let lastStats = null;
@@ -86,12 +90,11 @@
     redrawHistograms();
   }
 
-  // Item level comes from the dropdown, except when "Custom…" is selected, in
-  // which case the free-input field next to it is authoritative.
+  // #itemLevel is a hidden numeric field that both the equipment preset buttons
+  // and the free-entry box write to, so everything downstream reads one number
+  // and never has to care which control the player actually touched.
   function readItemLevel() {
-    const sel = $("itemLevel");
-    if (sel.value === "custom") return parseInt($("itemLevelCustom").value, 10);
-    return parseInt(sel.value, 10);
+    return parseInt($("itemLevel").value, 10);
   }
 
   function readInputs() {
@@ -309,6 +312,8 @@
   // the results panel is hidden — its canvases have zero client size there, so
   // a draw would blank them; the next run redraws from scratch anyway.
   function redrawHistograms() {
+    // The planner curve is canvas too, so it needs the same theme repaint.
+    if (planner && !$("optPlanner").classList.contains("hidden")) onPlannerInput();
     if (!lastStats || $("results").classList.contains("hidden")) return;
     drawHistograms(lastStats);
   }
@@ -451,12 +456,143 @@
     });
   }
 
-  // Reveal the free-input field only when "Custom…" is picked.
-  function syncItemLevelCustom() {
-    const isCustom = $("itemLevel").value === "custom";
-    const custom = $("itemLevelCustom");
-    custom.hidden = !isCustom;
-    if (isCustom) custom.focus();
+  // Anything that changes the numbers invalidates the matrix shading, the
+  // fodder comparison, and any standing optimizer recommendation.
+  function onInputsChanged() {
+    syncPlanTable();
+    clearOptResult();
+    syncFodder();
+  }
+
+  // ── Equipment presets ───────────────────────────────────────────────────
+
+  function buildEqPresets() {
+    $("eqPresets").innerHTML = SF.equipment.PRESETS.map(
+      (p) => `<button type="button" class="eq-preset" role="radio"
+        aria-checked="false" data-level="${p.level}" title="${p.sets.join(" · ")}">
+        ${SF.equipment.iconSvg(p.icon)}
+        <span class="eq-name">${p.label}</span>
+        <span class="eq-lvl">Lv ${p.level}</span>
+      </button>`,
+    ).join("");
+  }
+
+  function setItemLevel(level, opts) {
+    $("itemLevel").value = String(level);
+    if (!opts || !opts.fromCustom) $("itemLevelCustom").value = String(level);
+    syncEquipment();
+    syncEnhanceMode();
+    syncFodderLevel();
+    onInputsChanged();
+  }
+
+  // Highlight whichever preset matches the current level (none, if the player
+  // typed a level no set uses) and name the sets that share it.
+  function syncEquipment() {
+    const level = readItemLevel();
+    const preset = SF.equipment.byLevel(level);
+    document.querySelectorAll(".eq-preset").forEach((b) => {
+      const on = parseInt(b.dataset.level, 10) === level;
+      b.classList.toggle("is-active", on);
+      b.setAttribute("aria-checked", String(on));
+    });
+    $("eqSets").textContent = preset ? SF.equipment.setsLabel(preset) : "custom level";
+  }
+
+  // ── Trials slider ───────────────────────────────────────────────────────
+
+  const TRIAL_STEPS = [100, 500, 1000, 5000, 10000, 50000, 100000];
+
+  // Half-width of the 95% confidence interval on a probability, in percentage
+  // points, at its widest (p = 0.5). This is the number that tells a player how
+  // much to trust the result, and it is the whole reason the slider shows more
+  // than a raw trial count.
+  function marginOfError(n) {
+    return (1.96 * Math.sqrt(0.25 / n)) * 100;
+  }
+
+  function syncTrials() {
+    const n = TRIAL_STEPS[parseInt($("trialsSlider").value, 10)] || 10000;
+    $("trials").value = String(n);
+    $("trialsCount").textContent = n.toLocaleString("en-US") + " runs";
+
+    const moe = marginOfError(n);
+    $("trialsMoe").textContent = `±${moe.toFixed(moe < 1 ? 2 : 1)} pts`;
+
+    // Spell the interval out. "±1 percentage point" means nothing to most
+    // players; "a 50% reading really means 49–51%" does.
+    const lo = (50 - moe).toFixed(0);
+    const hi = (50 + moe).toFixed(0);
+    const speed =
+      n >= 50000
+        ? " Slow to run, but the number stops wobbling between runs."
+        : n <= 500
+          ? " Instant, but re-running will visibly change the answer."
+          : "";
+    $("trialsNote").textContent =
+      `A result near 50% is really somewhere in ${lo}–${hi}%.` + speed;
+  }
+
+  // ── Star range strip ────────────────────────────────────────────────────
+
+  const MAX_STARS = 30;
+
+  function buildStarStrip() {
+    // The game breaks its star display every 5, so build actual groups of 5 and
+    // let those wrap as units — a group split across two lines defeats the whole
+    // point of being able to count to "17" at a glance.
+    let html = "";
+    for (let g = 0; g < MAX_STARS / 5; g++) {
+      html += '<span class="star-group">';
+      for (let k = 1; k <= 5; k++) {
+        const i = g * 5 + k;
+        html += `<button type="button" class="star-cell" data-star="${i}"
+          aria-label="Star ${i}"><svg viewBox="0 0 24 24" width="15" height="15"
+          aria-hidden="true"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.4-5.8-3-5.8 3
+          1.1-6.4L2.6 9.4l6.5-.9L12 2.6z"/></svg></button>`;
+      }
+      html += "</span>";
+    }
+    $("starStrip").innerHTML = html;
+  }
+
+  function syncStarStrip() {
+    const cur = parseInt($("currentStar").value, 10) || 0;
+    const tgt = parseInt($("targetStar").value, 10) || 0;
+    document.querySelectorAll(".star-cell").forEach((c) => {
+      const s = parseInt(c.dataset.star, 10);
+      c.classList.toggle("is-have", s <= cur);
+      c.classList.toggle("is-gain", s > cur && s <= tgt);
+      c.classList.toggle("is-target", s === tgt);
+    });
+  }
+
+  // Click sets the star you already have; shift-click sets the one you want.
+  // Either way keep current < target, nudging the other end rather than
+  // rejecting the click — a picker that silently ignores you feels broken.
+  function onStarClick(e) {
+    const cell = e.target.closest(".star-cell");
+    if (!cell) return;
+    const s = parseInt(cell.dataset.star, 10);
+    const curEl = $("currentStar");
+    const tgtEl = $("targetStar");
+    if (e.shiftKey) {
+      tgtEl.value = String(s);
+      if (parseInt(curEl.value, 10) >= s) curEl.value = String(s - 1);
+    } else {
+      curEl.value = String(s);
+      if (parseInt(tgtEl.value, 10) <= s) tgtEl.value = String(Math.min(MAX_STARS, s + 1));
+    }
+    syncStarStrip();
+    onInputsChanged();
+  }
+
+  // ── Radio groups ────────────────────────────────────────────────────────
+
+  // Mirror a radio group into the hidden input the rest of the app reads.
+  function syncRadioGroup(groupName, hiddenId) {
+    const picked = document.querySelector(`input[name="${groupName}"]:checked`);
+    if (picked) $(hiddenId).value = picked.value;
   }
 
   function syncEnhanceMode() {
@@ -717,9 +853,12 @@
   // result stale — hide it so a stale plan can't be applied by mistake.
   function clearOptResult() {
     lastOptimizedPlan = null;
+    planner = null;
+    lastPlanIdx = -1;
     const el = $("optResult");
     el.classList.add("hidden");
     el.innerHTML = "";
+    $("optPlanner").classList.add("hidden");
   }
 
   async function runOptimize() {
@@ -751,18 +890,12 @@
     }
 
     const opts = readOptBaseOpts();
-    const budgetB = parseFloat($("optBudget").value);
-    const spares = parseInt($("optSpares").value, 10) || 0;
-    if (!Number.isFinite(budgetB) || budgetB < 0) {
-      errEl.textContent = "Enter a meso budget (in billions).";
-      return;
-    }
-    const budgetMesos = budgetB * 1e9;
     const params = { currentStar, targetStar, itemLevel, opts };
 
-    // Maximize P(total cost ≤ budget AND booms ≤ spares). No closed form for the
-    // joint distribution, so simulate — but only the plans on the analytic
-    // mean-(cost, booms) Pareto frontier, where the optimum has to live.
+    // Sample each frontier plan once and keep the indexed (cost, booms) joint
+    // distribution. Every budget/spares question the player can ask afterwards
+    // is a lookup against these samples, so the sliders answer instantly rather
+    // than kicking off a fresh simulation per drag.
     const btn = $("optimizeBtn");
     const label = btn.textContent;
     btn.disabled = true;
@@ -771,49 +904,366 @@
       const fr = SF.optimizer.optimizeFrontier(params, 24);
       // Heavier ranges (toward 30★) get fewer trials so the sweep stays snappy.
       const trials = targetStar <= 24 ? 5000 : 2500;
-      const scored = [];
+      const indexed = [];
       for (let i = 0; i < fr.candidates.length; i++) {
         const cand = fr.candidates[i];
         const input = Object.assign(
           { currentStar, targetStar, itemLevel, starPlan: cand.plan },
           opts,
         );
-        const prob = SF.optimizer.successProb(input, budgetMesos, spares, trials);
-        scored.push(Object.assign({ prob }, cand));
+        indexed.push({
+          plan: cand.plan,
+          expCost: cand.expCost,
+          expBooms: cand.expBooms,
+          index: SF.optimizer.sampleIndex(input, trials),
+        });
         btn.textContent = `Optimizing ${i + 1} / ${fr.candidates.length}`;
         // Yield so the button text repaints between candidates.
         await new Promise((r) => setTimeout(r, 0));
       }
-      // Pick the cheapest plan whose odds are within a tolerance of the best
-      // odds, rather than the strict maximum. Chasing the last fraction of a
-      // percent — often just Monte-Carlo noise — makes the optimizer overspend
-      // (e.g. buying Mode 4 to go 99.9% → 100% when the budget is huge). When
-      // several plans are effectively tied on odds, the player wants the cheapest.
-      const ODDS_TOL = 0.01; // 1 percentage point
-      const maxProb = scored.reduce((m, r) => Math.max(m, r.prob), 0);
-      let best = null;
-      for (const r of scored) {
-        if (r.prob >= maxProb - ODDS_TOL && (!best || r.expCost < best.expCost)) {
-          best = r;
-        }
-      }
-      lastOptimizedPlan = best.plan;
-      renderOptResult({
-        result: best,
-        budgetMesos,
-        spares,
-        prob: best.prob,
+
+      planner = {
+        indexed,
         trials,
         frontierSize: fr.frontierSize,
         currentStar,
         targetStar,
         itemLevel,
-      });
+      };
+      setupPlannerRanges();
+      $("optPlanner").classList.remove("hidden");
+      onPlannerInput();
     } finally {
       btn.disabled = false;
       btn.classList.remove("is-running");
       btn.textContent = label;
     }
+  }
+
+  // ── Budget planner ──────────────────────────────────────────────────────
+
+  function fmtB(mesos) {
+    const b = mesos / 1e9;
+    if (b >= 100) return b.toFixed(0) + " B";
+    if (b >= 10) return b.toFixed(1) + " B";
+    return b.toFixed(2) + " B";
+  }
+
+  // A fixed 0–100B slider is useless at level 250 and far too coarse at 120, so
+  // scale the track to what this particular climb actually costs: from the
+  // cheapest run seen up to a budget that all but guarantees a finish.
+  function setupPlannerRanges() {
+    const cheapest = planner.indexed.reduce(
+      (m, c) => Math.min(m, c.index.sortedCosts[0]),
+      Infinity,
+    );
+    const generous = planner.indexed.reduce(
+      (m, c) => Math.max(m, SF.optimizer.quantile(c.index, 0.995)),
+      0,
+    );
+    const lo = Math.max(0, Math.floor((cheapest * 0.9) / 1e9));
+    const hi = Math.max(lo + 1, Math.ceil(generous / 1e9));
+    const step = hi - lo > 200 ? 5 : hi - lo > 60 ? 1 : 0.5;
+
+    const s = $("optBudgetSlider");
+    s.min = String(lo);
+    s.max = String(hi);
+    s.step = String(step);
+
+    // Keep the saved budget if it still lands on the track, else start at the
+    // knee — the most useful default we can offer.
+    const saved = parseFloat($("optBudget").value);
+    s.value = String(
+      Number.isFinite(saved) && saved >= lo && saved <= hi
+        ? saved
+        : Math.round((lo + hi) / 2),
+    );
+
+    $("optBudgetTicks").innerHTML = [lo, (lo + hi) / 2, hi]
+      .map((v) => `<span>${v.toFixed(0)}B</span>`)
+      .join("");
+
+    const spares = $("optSparesSlider");
+    spares.value = String(parseInt($("optSpares").value, 10) || 0);
+  }
+
+  // Everything below reads the cached samples, so this runs on every slider
+  // frame without re-simulating anything.
+  function onPlannerInput() {
+    if (!planner) return;
+    const budgetB = parseFloat($("optBudgetSlider").value);
+    const spares = parseInt($("optSparesSlider").value, 10) || 0;
+    const budget = budgetB * 1e9;
+
+    $("optBudget").value = String(budgetB);
+    $("optSpares").value = String(spares);
+    $("optBudgetVal").textContent = budgetB.toFixed(budgetB >= 10 ? 0 : 1) + " B";
+    $("optSparesVal").textContent = String(spares);
+    saveOptSettings();
+
+    const best = SF.optimizer.envelopeAt(planner.indexed, budget, spares);
+    if (!best) return;
+    const cand = best.cand;
+    lastOptimizedPlan = cand.plan;
+
+    const curve = buildCurve(spares);
+    const knee = SF.optimizer.findKnee(curve);
+
+    renderOdds(best.prob, budget, spares);
+    drawOptCurve(curve, knee, budget, best.prob);
+    renderKnee(knee, curve, spares, budget);
+    renderLadder(spares, budget);
+    $("optCurveSub").textContent =
+      spares === 0 ? "no spares · best plan at each budget" : `${spares} spare${spares === 1 ? "" : "s"} · best plan at each budget`;
+
+    // The per-star table only moves when the winning plan changes, which is a
+    // handful of times across the whole track — don't rebuild it every frame.
+    if (best.i !== lastPlanIdx) {
+      lastPlanIdx = best.i;
+      renderOptResult({
+        result: cand,
+        budgetMesos: budget,
+        spares,
+        prob: best.prob,
+        trials: planner.trials,
+        frontierSize: planner.frontierSize,
+        currentStar: planner.currentStar,
+        targetStar: planner.targetStar,
+        itemLevel: planner.itemLevel,
+      });
+    }
+  }
+
+  // Sample the envelope across the slider's whole track.
+  function buildCurve(spares) {
+    const s = $("optBudgetSlider");
+    const lo = parseFloat(s.min) * 1e9;
+    const hi = parseFloat(s.max) * 1e9;
+    const N = 72;
+    const budgets = [];
+    for (let i = 0; i <= N; i++) budgets.push(lo + ((hi - lo) * i) / N);
+    return SF.optimizer.envelopeCurve(planner.indexed, spares, budgets);
+  }
+
+  function renderOdds(prob, budget, spares) {
+    const pct = (prob * 100).toFixed(1);
+    const moe = marginOfError(planner.trials);
+    const spareLabel = spares === 1 ? "spare" : "spares";
+    $("optOdds").innerHTML =
+      `<div class="odds-hero"><span class="odds-pct">${pct}%</span>` +
+      `<span class="odds-cap">chance to reach ${planner.targetStar}★</span></div>` +
+      `<p class="odds-sub">with ${fmtB(budget)} and ${spares} ${spareLabel} ` +
+      `<span class="odds-moe">±${moe.toFixed(1)} pts</span></p>`;
+  }
+
+  // The headline answer to "how long do I keep saving?". Past the elbow each
+  // extra billion buys measurably less, so that budget is the natural stopping
+  // point — state it in the units the player actually decides in.
+  // Spares cap the odds no matter the budget: if a run booms more times than you
+  // have replacements you have lost, and no amount of meso changes that. When
+  // that ceiling is what's binding, more meso is the wrong thing to save for —
+  // say so, because the curve alone just looks like it flattens.
+  function spareCeilingNote(spares) {
+    const ceiling = SF.optimizer.envelopeAt(planner.indexed, Infinity, spares).prob;
+    if (ceiling > 0.985) return "";
+    const next = SF.optimizer.envelopeAt(planner.indexed, Infinity, spares + 1).prob;
+    const gain = (next - ceiling) * 100;
+    if (gain < 1) return "";
+    return (
+      `<p class="knee-ceiling">Spares are the real cap here: with ${spares}, ` +
+      `unlimited meso still tops out at <strong>${(ceiling * 100).toFixed(0)}%</strong>. ` +
+      `One more spare raises that to <strong>${(next * 100).toFixed(0)}%</strong>.</p>`
+    );
+  }
+
+  function renderKnee(knee, curve, spares, budget) {
+    const el = $("optKnee");
+    if (!knee) {
+      el.innerHTML =
+        `<div class="knee-card"><p class="knee-body">No clear drop-off across this ` +
+        `budget range — odds climb steadily, so more meso keeps paying off at about ` +
+        `the same rate.</p>${spareCeilingNote(spares)}</div>`;
+      return;
+    }
+    const kb = knee.point.budget;
+    const kp = knee.point.prob;
+    const last = curve[curve.length - 1];
+    // Marginal value of the next 10B, before and after the elbow.
+    const per10 = (from) => {
+      const a = SF.optimizer.envelopeAt(planner.indexed, from, spares).prob;
+      const b = SF.optimizer.envelopeAt(planner.indexed, from + 1e10, spares).prob;
+      return (b - a) * 100;
+    };
+    const before = per10(Math.max(0, kb - 1e10));
+    const after = per10(kb);
+    const behind = budget < kb * 0.98;
+    const past = budget > kb * 1.02;
+
+    el.innerHTML =
+      `<div class="knee-card">` +
+      `<div class="knee-head"><span class="knee-dot"></span><span class="knee-title">Diminishing returns at ${fmtB(kb)}</span></div>` +
+      `<p class="knee-body">That budget gets you <strong>${(kp * 100).toFixed(0)}%</strong> odds. ` +
+      `Up to there, every 10B adds about <strong>${before.toFixed(1)} pts</strong>; ` +
+      `after it, only <strong>${after.toFixed(1)} pts</strong>. ` +
+      `Saving all the way to ${fmtB(last.budget)} buys just ` +
+      `<strong>${((last.prob - kp) * 100).toFixed(0)} pts</strong> more.</p>` +
+      (behind
+        ? `<p class="knee-verdict">You're below the elbow — more meso is still working hard for you.</p>`
+        : past
+          ? `<p class="knee-verdict">You're past the elbow — extra meso is mostly wasted. Tap now, or put it toward spares instead.</p>`
+          : `<p class="knee-verdict">You're right at the sweet spot. This is the efficient place to stop saving.</p>`) +
+      spareCeilingNote(spares) +
+      `</div>`;
+  }
+
+  // A few round budgets with what each one buys, so the trade is legible without
+  // reading the curve pixel by pixel.
+  function renderLadder(spares, budget) {
+    const targets = [0.5, 0.75, 0.9, 0.95, 0.99];
+    const s = $("optBudgetSlider");
+    const hi = parseFloat(s.max) * 1e9;
+    const rows = targets
+      .map((t) => {
+        const need = SF.optimizer.budgetForProb(planner.indexed, spares, t, hi);
+        if (need == null) {
+          return `<tr class="ladder-row--out"><td>${(t * 100).toFixed(0)}%</td>
+            <td class="num">out of reach</td><td class="num">—</td></tr>`;
+        }
+        const delta = need - budget;
+        const cls = delta <= 0 ? "ladder-have" : "";
+        const gap =
+          delta <= 0
+            ? '<span class="ladder-ok">covered</span>'
+            : `+${fmtB(delta)}`;
+        return `<tr class="${cls}"><td>${(t * 100).toFixed(0)}%</td>
+          <td class="num">${fmtB(need)}</td><td class="num">${gap}</td></tr>`;
+      })
+      .join("");
+    $("optLadder").innerHTML =
+      `<table class="mode-table opt-table ladder-table">
+        <thead><tr><th>Odds</th><th>Budget needed</th><th>vs yours</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+  }
+
+  // Single-series line chart: budget on x, finish odds on y, with the elbow and
+  // the player's current budget called out. One series, so no legend — the
+  // caption names it.
+  function drawOptCurve(curve, knee, budget, prob) {
+    const canvas = $("optCurve");
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth;
+    const cssH = canvas.clientHeight;
+    if (!cssW) return;
+    canvas.width = cssW * dpr;
+    canvas.height = cssH * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const padL = 40,
+      padR = 14,
+      padT = 12,
+      padB = 26;
+    const w = cssW - padL - padR;
+    const h = cssH - padT - padB;
+    const x0 = curve[0].budget;
+    const x1 = curve[curve.length - 1].budget;
+    const sx = (b) => padL + ((b - x0) / (x1 - x0 || 1)) * w;
+    const sy = (p) => padT + h - p * h;
+
+    const accent = cssVar("--accent") || "#d4a259";
+    const border = cssVar("--border") || "#24272e";
+    const muted = cssVar("--muted") || "#8a8d96";
+
+    // Recessive gridlines at each 25%.
+    ctx.strokeStyle = border;
+    ctx.lineWidth = 1;
+    ctx.font = '10.5px "IBM Plex Mono", ui-monospace, monospace';
+    ctx.fillStyle = muted;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "right";
+    for (let p = 0; p <= 1.0001; p += 0.25) {
+      const y = Math.round(sy(p)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(padL, y);
+      ctx.lineTo(padL + w, y);
+      ctx.stroke();
+      ctx.fillText((p * 100).toFixed(0) + "%", padL - 6, sy(p));
+    }
+
+    // Fill under the curve, then the 2px line on top.
+    ctx.beginPath();
+    ctx.moveTo(sx(curve[0].budget), sy(0));
+    curve.forEach((pt) => ctx.lineTo(sx(pt.budget), sy(pt.prob)));
+    ctx.lineTo(sx(curve[curve.length - 1].budget), sy(0));
+    ctx.closePath();
+    ctx.fillStyle = cssVar("--active-col-bg") || "rgba(212,162,89,0.08)";
+    ctx.fill();
+
+    ctx.beginPath();
+    curve.forEach((pt, i) =>
+      i ? ctx.lineTo(sx(pt.budget), sy(pt.prob)) : ctx.moveTo(sx(pt.budget), sy(pt.prob)),
+    );
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+
+    // Elbow marker: dashed drop line plus a ringed dot.
+    if (knee) {
+      const kx = sx(knee.point.budget);
+      const ky = sy(knee.point.prob);
+      ctx.save();
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = muted;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(kx, ky);
+      ctx.lineTo(kx, padT + h);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.beginPath();
+      ctx.arc(kx, ky, 5, 0, Math.PI * 2);
+      ctx.fillStyle = accent;
+      ctx.fill();
+      // 2px surface ring keeps the dot readable where it sits on the line.
+      ctx.strokeStyle = cssVar("--panel") || "#15171c";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      ctx.fillStyle = muted;
+      ctx.textBaseline = "bottom";
+      ctx.textAlign = kx > padL + w * 0.7 ? "right" : "left";
+      ctx.fillText("elbow", kx + (kx > padL + w * 0.7 ? -8 : 8), ky - 6);
+    }
+
+    // The player's current budget.
+    const bx = Math.max(padL, Math.min(padL + w, sx(budget)));
+    ctx.strokeStyle = accent;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(bx, padT);
+    ctx.lineTo(bx, padT + h);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(bx, sy(prob), 4, 0, Math.PI * 2);
+    ctx.fillStyle = accent;
+    ctx.fill();
+
+    // Axis line + end labels.
+    ctx.strokeStyle = border;
+    ctx.beginPath();
+    ctx.moveTo(padL, padT + h + 0.5);
+    ctx.lineTo(padL + w, padT + h + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = muted;
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(fmtB(x0), padL, padT + h + 7);
+    ctx.textAlign = "right";
+    ctx.fillText(fmtB(x1), padL + w, padT + h + 7);
   }
 
   function renderOptResult(ctx) {
@@ -866,8 +1316,9 @@
         .join("") +
       "</div>";
 
-    const spareLabel = spares === 1 ? "spare" : "spares";
-    let note = `<p class="opt-note">≈${(ctx.prob * 100).toFixed(1)}% chance to reach ${targetStar}★ for ≤ ${fmtMesos(budgetMesos)} and ≤ ${spares} ${spareLabel}. Picked from ${ctx.frontierSize} cost/boom-efficient plans, ${ctx.trials.toLocaleString("en-US")} trials each.</p>`;
+    // The odds headline lives above the chart now, so this note only has to
+    // explain where the plan came from.
+    let note = `<p class="opt-note">Best plan at ${fmtMesos(budgetMesos)}, picked from ${ctx.frontierSize} cost/boom-efficient candidates, ${ctx.trials.toLocaleString("en-US")} trials each.</p>`;
     // When even the best plan rarely finishes, the constraints — not the plan —
     // are the problem; say so rather than presenting a long-shot as "optimal".
     if (ctx.prob < 0.5) {
@@ -1141,20 +1592,41 @@
   document.addEventListener("DOMContentLoaded", () => {
     $("sf-form").addEventListener("submit", onSubmit);
     $("enhanceMode").addEventListener("input", syncEnhanceMode);
-    $("event").addEventListener("change", () => {
-      syncBoomTable();
-      syncRateCostTable();
-    });
-    $("mvp").addEventListener("change", syncRateCostTable);
-    $("itemLevel").addEventListener("change", () => {
-      syncItemLevelCustom();
-      syncEnhanceMode();
-      syncFodderLevel();
+
+    // Equipment presets write the level; the box below them accepts anything.
+    buildEqPresets();
+    $("eqPresets").addEventListener("click", (e) => {
+      const btn = e.target.closest(".eq-preset");
+      if (btn) setItemLevel(parseInt(btn.dataset.level, 10));
     });
     $("itemLevelCustom").addEventListener("input", () => {
-      syncEnhanceMode();
-      syncFodderLevel();
+      const v = parseInt($("itemLevelCustom").value, 10);
+      if (Number.isFinite(v)) setItemLevel(v, { fromCustom: true });
     });
+
+    // Trials slider.
+    $("trialsSlider").addEventListener("input", syncTrials);
+
+    // Star strip.
+    buildStarStrip();
+    $("starStrip").addEventListener("click", onStarClick);
+    ["currentStar", "targetStar"].forEach((id) =>
+      $(id).addEventListener("input", syncStarStrip),
+    );
+
+    // MVP / Event radios feed the hidden inputs the rest of the app reads.
+    $("mvpRadios").addEventListener("change", () => {
+      syncRadioGroup("mvpChoice", "mvp");
+      syncRateCostTable();
+      onInputsChanged();
+    });
+    $("eventRadios").addEventListener("change", () => {
+      syncRadioGroup("eventChoice", "event");
+      syncBoomTable();
+      syncRateCostTable();
+      onInputsChanged();
+    });
+
     $("starCatching").addEventListener("change", syncEnhanceMode);
     $("safeguard").addEventListener("change", () => {
       syncEnhanceMode();
@@ -1169,31 +1641,18 @@
     // Inputs the matrix's boom%/cost and active-range shading depend on. (The
     // mode slider and safeguard checkbox are Quick-only and don't feed it.)
     // They also feed the optimizer, so clear any stale recommendation too.
-    [
-      "event",
-      "mvp",
-      "starCatching",
-      "itemLevel",
-      "itemLevelCustom",
-      "currentStar",
-      "targetStar",
-    ].forEach((id) => {
+    // The preset buttons, star strip and radio groups call onInputsChanged
+    // themselves; these are the plain fields that still need wiring.
+    ["starCatching", "currentStar", "targetStar"].forEach((id) => {
       const el = $(id);
-      const evt = el.tagName === "INPUT" && el.type === "number" ? "input" : "change";
-      el.addEventListener(evt, () => {
-        syncPlanTable();
-        clearOptResult();
-        syncFodder();
-      });
+      const evt = el.type === "number" ? "input" : "change";
+      el.addEventListener(evt, onInputsChanged);
     });
 
-    // Optimize tab controls.
-    ["optBudget", "optSpares"].forEach((id) =>
-      $(id).addEventListener("input", () => {
-        saveOptSettings();
-        clearOptResult();
-      }),
-    );
+    // Optimize tab: the sliders only re-query the cached sample, so they update
+    // live rather than invalidating the run the way the form inputs do.
+    $("optBudgetSlider").addEventListener("input", onPlannerInput);
+    $("optSparesSlider").addEventListener("input", onPlannerInput);
     $("optimizeBtn").addEventListener("click", runOptimize);
     loadOptSettings();
 
@@ -1236,7 +1695,9 @@
     // bootstrap script picked (and repaint nothing — no results exist yet).
     applyTheme(currentTheme(), false);
 
-    syncItemLevelCustom();
+    syncEquipment();
+    syncTrials();
+    syncStarStrip();
     syncEnhanceMode();
     syncBoomTable();
 

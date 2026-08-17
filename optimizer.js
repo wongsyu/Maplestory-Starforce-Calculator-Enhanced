@@ -219,10 +219,8 @@
     };
   }
 
-  // Monte-Carlo P(total cost ≤ budget AND booms ≤ spares) for one plan, reusing
-  // the same fast trial kernel the main simulation uses.
-  function successProb(input, budgetMesos, spares, trials) {
-    const opts = {
+  function planOpts(input) {
+    return {
       starCatching: !!input.starCatching,
       safeguard: !!input.safeguard,
       mvp: input.mvp || "none",
@@ -230,13 +228,151 @@
       enhanceMode: input.enhanceMode || 0,
       starPlan: input.starPlan || null,
     };
-    const tables = SF.buildStarTables(input.targetStar, input.itemLevel, opts);
+  }
+
+  // Monte-Carlo P(total cost ≤ budget AND booms ≤ spares) for one plan, reusing
+  // the same fast trial kernel the main simulation uses.
+  function successProb(input, budgetMesos, spares, trials) {
+    const tables = SF.buildStarTables(
+      input.targetStar,
+      input.itemLevel,
+      planOpts(input),
+    );
     let ok = 0;
     for (let i = 0; i < trials; i++) {
       const t = SF.simulateOnceFast(input.currentStar, input.targetStar, tables);
       if (t.totalCost <= budgetMesos && t.booms <= spares) ok++;
     }
     return ok / trials;
+  }
+
+  // ── Budget planning ─────────────────────────────────────────────────────
+  // successProb() answers one (budget, spares) question per simulation, which is
+  // fine for a button but hopeless behind a slider. Instead sample the *joint*
+  // (cost, booms) distribution once and index it: bucket the trials by boom
+  // count, sort each bucket's costs, and P(cost ≤ B AND booms ≤ S) becomes
+  //     Σ_{k≤S} |{ costs in bucket k that are ≤ B }| / trials
+  // — a binary search per bucket. One pass then answers every budget the player
+  // can drag to, in microseconds, which is what makes the curve live.
+
+  // Sample a plan and index it in one pass.
+  function sampleIndex(input, trials) {
+    const tables = SF.buildStarTables(
+      input.targetStar,
+      input.itemLevel,
+      planOpts(input),
+    );
+    const costs = [];
+    const booms = [];
+    let maxBooms = 0;
+    for (let i = 0; i < trials; i++) {
+      const t = SF.simulateOnceFast(input.currentStar, input.targetStar, tables);
+      costs.push(t.totalCost);
+      booms.push(t.booms);
+      if (t.booms > maxBooms) maxBooms = t.booms;
+    }
+    const buckets = [];
+    for (let k = 0; k <= maxBooms; k++) buckets.push([]);
+    for (let i = 0; i < trials; i++) buckets[booms[i]].push(costs[i]);
+    buckets.forEach((b) => b.sort((x, y) => x - y));
+
+    const sorted = costs.slice().sort((a, b) => a - b);
+    return {
+      trials,
+      maxBooms,
+      buckets: buckets.map((b) => Float64Array.from(b)),
+      sortedCosts: Float64Array.from(sorted),
+    };
+  }
+
+  // Count of entries ≤ v in a sorted Float64Array (upper bound).
+  function countAtMost(arr, v) {
+    let lo = 0;
+    let hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid] <= v) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  function probAt(index, budget, spares) {
+    const top = Math.min(spares, index.maxBooms);
+    let ok = 0;
+    for (let k = 0; k <= top; k++) ok += countAtMost(index.buckets[k], budget);
+    return ok / index.trials;
+  }
+
+  function quantile(index, q) {
+    const a = index.sortedCosts;
+    if (a.length === 0) return 0;
+    const i = Math.min(a.length - 1, Math.max(0, Math.round(q * (a.length - 1))));
+    return a[i];
+  }
+
+  // Best achievable odds at (budget, spares) across every candidate plan, plus
+  // which plan gets you there. The player's real question is "what can this much
+  // meso buy me", not "how does one fixed plan fare" — and the best plan for a
+  // tight budget is genuinely not the best plan for a fat one (a cheap high-boom
+  // line wins when you can't afford safeguard, and loses when you can).
+  function envelopeAt(indexed, budget, spares) {
+    let best = null;
+    for (let i = 0; i < indexed.length; i++) {
+      const p = probAt(indexed[i].index, budget, spares);
+      if (!best || p > best.prob + 1e-12) best = { prob: p, cand: indexed[i], i };
+    }
+    return best;
+  }
+
+  // The envelope sampled across a budget range — the curve the planner draws.
+  function envelopeCurve(indexed, spares, budgets) {
+    return budgets.map((b) => {
+      const e = envelopeAt(indexed, b, spares);
+      return { budget: b, prob: e ? e.prob : 0, planIdx: e ? e.i : -1 };
+    });
+  }
+
+  // Cheapest budget that still reaches `target` odds, by bisection on the
+  // envelope (monotone non-decreasing in budget, so bisection is exact to `tol`).
+  function budgetForProb(indexed, spares, target, hiHint) {
+    let lo = 0;
+    let hi = hiHint;
+    if (envelopeAt(indexed, hi, spares).prob < target) return null;
+    for (let i = 0; i < 40; i++) {
+      const mid = (lo + hi) / 2;
+      if (envelopeAt(indexed, mid, spares).prob >= target) hi = mid;
+      else lo = mid;
+    }
+    return hi;
+  }
+
+  // Diminishing-returns point: the curve point furthest from the straight chord
+  // joining its ends (the standard "elbow" construction). On a concave rising
+  // curve that is exactly where the steep early gains flatten out — past it each
+  // extra billion buys measurably less probability, which is the moment the
+  // player stops saving and starts tapping. Axes are normalised first so the
+  // answer doesn't depend on whether cost is read in mesos or billions.
+  function findKnee(points) {
+    if (points.length < 3) return null;
+    const x0 = points[0].budget;
+    const y0 = points[0].prob;
+    const x1 = points[points.length - 1].budget;
+    const y1 = points[points.length - 1].prob;
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    if (dx <= 0 || Math.abs(dy) < 1e-9) return null;
+
+    let best = null;
+    for (let i = 1; i < points.length - 1; i++) {
+      const nx = (points[i].budget - x0) / dx;
+      const ny = (points[i].prob - y0) / dy;
+      // Perpendicular offset from the unit chord, in normalised space.
+      const dist = ny - nx;
+      if (!best || dist > best.dist) best = { dist, point: points[i], i };
+    }
+    // A dead-straight or convex curve has no meaningful elbow to report.
+    return best && best.dist > 0.02 ? best : null;
   }
 
   SF.optimizer = {
@@ -246,5 +382,12 @@
     planMetrics,
     optimizeFrontier,
     successProb,
+    sampleIndex,
+    probAt,
+    quantile,
+    envelopeAt,
+    envelopeCurve,
+    budgetForProb,
+    findKnee,
   };
 })(window);

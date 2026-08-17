@@ -2,6 +2,7 @@
 <html><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>SF tests</title></head>
 <body><pre id="out"></pre>
 <script src="rates.js"></script>
+<script src="equipment.js"></script>
 <script src="simulator.js"></script>
 <script src="optimizer.js"></script>
 <script src="fodder.js"></script>
@@ -156,5 +157,92 @@
     }
     check("floor: " + name + " matches sim (" + lo + "★)", lo === SF.reachableFloor(cur, tgt, fOpts(p)));
   });
+
+  // ── Budget planner ────────────────────────────────────────────────────
+  // sampleIndex + probAt replace a per-question simulation with one sample and
+  // a lookup, so the first thing to prove is that the lookup agrees with the
+  // simulation it replaces.
+  const pInput = {
+    currentStar: 15, targetStar: 20, itemLevel: 160,
+    mvp: "none", event: "none", starCatching: true, safeguard: false,
+    starPlan: null, enhanceMode: 1,
+  };
+  const idx = SF.optimizer.sampleIndex(pInput, 20000);
+  check("planner: sample keeps every trial", idx.trials === 20000);
+  check("planner: buckets total the trial count",
+    idx.buckets.reduce((n, b) => n + b.length, 0) === 20000);
+  check("planner: each bucket is sorted",
+    idx.buckets.every((b) => b.every((v, i) => i === 0 || b[i - 1] <= v)));
+
+  // Zero budget can never finish; a huge budget with unlimited spares always does.
+  check("planner: P(0 budget) = 0", SF.optimizer.probAt(idx, 0, 99) === 0);
+  check("planner: P(huge budget, all spares) = 1",
+    SF.optimizer.probAt(idx, 1e18, 99) === 1);
+
+  // Monotone in both arguments — more meso and more spares can only help.
+  let mono = true;
+  for (let b = 1e9; b <= 60e9; b += 5e9) {
+    if (SF.optimizer.probAt(idx, b, 2) < SF.optimizer.probAt(idx, b - 5e9, 2)) mono = false;
+    if (SF.optimizer.probAt(idx, b, 1) > SF.optimizer.probAt(idx, b, 2)) mono = false;
+  }
+  check("planner: prob rises with budget and spares", mono);
+
+  // The lookup and the old per-question simulation must agree to sampling noise.
+  const pb = 25e9;
+  const viaIndex = SF.optimizer.probAt(idx, pb, 1);
+  const viaSim = SF.optimizer.successProb(pInput, pb, 1, 20000);
+  check("planner: index matches successProb (±0.02)", Math.abs(viaIndex - viaSim) < 0.02);
+
+  // quantile must line up with what probAt reports at that cost.
+  const q50 = SF.optimizer.quantile(idx, 0.5);
+  check("planner: median cost splits the sample",
+    Math.abs(SF.optimizer.probAt(idx, q50, 99) - 0.5) < 0.02);
+
+  // budgetForProb inverts the envelope: the budget it returns must clear the
+  // target, and a shade under it must not. Spares cap the reachable odds no
+  // matter the budget (P can never exceed P(booms ≤ spares)), so calibrate the
+  // target against what this spare count can actually reach rather than
+  // assuming 90% is on the table.
+  const oneCand = [{ index: idx }];
+  const ceiling = SF.optimizer.probAt(idx, Infinity, 3);
+  const goal = ceiling - 0.05;
+  const need = SF.optimizer.budgetForProb(oneCand, 3, goal, 1e13);
+  check("planner: budgetForProb reaches its target",
+    need != null && SF.optimizer.probAt(idx, need, 3) >= goal - 1e-9);
+  check("planner: budgetForProb is tight",
+    need != null && SF.optimizer.probAt(idx, need * 0.98, 3) < goal);
+  check("planner: spares cap the odds below 100%", ceiling < 1);
+  check("planner: target above the spare ceiling returns null",
+    SF.optimizer.budgetForProb(oneCand, 3, ceiling + 0.01, 1e13) === null);
+  check("planner: impossible target returns null",
+    SF.optimizer.budgetForProb(oneCand, 0, 1.5, 1e13) === null);
+
+  // findKnee on a synthetic concave curve must land in the bend, and must
+  // decline to invent one on a straight line.
+  const concave = [];
+  for (let i = 0; i <= 60; i++) {
+    const x = i / 60;
+    concave.push({ budget: x * 100e9, prob: 1 - Math.exp(-6 * x) });
+  }
+  const knee = SF.optimizer.findKnee(concave);
+  check("planner: knee found on a concave curve", knee != null);
+  check("planner: knee sits in the bend, not at an end",
+    knee && knee.point.prob > 0.55 && knee.point.prob < 0.95);
+  const straight = concave.map((p, i) => ({ budget: p.budget, prob: i / 60 }));
+  check("planner: no knee on a straight line", SF.optimizer.findKnee(straight) === null);
+
+  // ── Equipment presets ─────────────────────────────────────────────────
+  check("equipment: AbsoLab is level 160",
+    SF.equipment.PRESETS.some((p) => p.level === 160 && p.sets.includes("AbsoLab")));
+  check("equipment: Arcane Umbra is level 200",
+    SF.equipment.PRESETS.some((p) => p.level === 200 && p.sets.includes("Arcane Umbra")));
+  check("equipment: Eternal is level 250",
+    SF.equipment.PRESETS.some((p) => p.level === 250 && p.sets.includes("Eternal")));
+  check("equipment: levels ascend",
+    SF.equipment.PRESETS.every((p, i, a) => i === 0 || a[i - 1].level < p.level));
+  check("equipment: every preset has a real icon",
+    SF.equipment.PRESETS.every((p) => !!SF.equipment.ICONS[p.icon]));
+  check("equipment: byLevel finds a set", SF.equipment.byLevel(160).label === "AbsoLab");
+  check("equipment: byLevel is null off-preset", SF.equipment.byLevel(163) === null);
 </script>
 </body></html>

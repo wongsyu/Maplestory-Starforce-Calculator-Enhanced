@@ -1355,3 +1355,505 @@ th[data-mode-col].active-mode-col {
     padding: 0 12px 0 30px;
   }
 }
+
+/* ── Equipment presets ─────────────────────────────────── */
+/* Named gear instead of a bare level number: players know "AbsoLab", not 160. */
+.eq-presets {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 0 0 10px;
+}
+
+.eq-preset {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 9px 4px 7px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  transition:
+    border-color 0.12s,
+    color 0.12s,
+    background 0.12s;
+}
+
+.eq-preset:hover {
+  border-color: var(--border-hover-strong);
+  color: var(--text);
+}
+
+.eq-preset.is-active {
+  border-color: var(--accent);
+  background: var(--active-col-bg);
+  color: var(--accent);
+}
+
+.eq-preset:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.eq-icon {
+  display: block;
+}
+
+.eq-name {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.eq-lvl {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  color: var(--muted-2);
+}
+
+.eq-preset.is-active .eq-lvl {
+  color: var(--accent);
+}
+
+.eq-custom-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.eq-custom {
+  flex: 0 0 110px;
+}
+
+.eq-sets {
+  flex: 1 1 auto;
+  padding-bottom: 9px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-2);
+}
+
+/* ── Trials slider ─────────────────────────────────────── */
+.trials-field {
+  padding: 2px 0 0;
+}
+
+/* Seven milestones need tighter type than the 4-stop mode slider. */
+.trials-ticks {
+  font-size: 9.5px;
+  letter-spacing: 0.02em;
+}
+
+.trials-readout {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+
+.trials-count {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.trials-moe {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted-2);
+}
+
+.trials-note {
+  margin: 5px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+/* ── Star range strip ──────────────────────────────────── */
+.star-picker {
+  padding-bottom: 10px;
+}
+
+.star-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 9px;
+}
+
+/* Groups of 5 wrap as units, matching the in-game star display. */
+.star-group {
+  display: flex;
+  gap: 1px;
+}
+
+.star-cell {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 2px;
+  color: var(--border-hover);
+  cursor: pointer;
+  transition: color 0.1s, transform 0.1s;
+}
+
+.star-cell svg {
+  fill: currentColor;
+}
+
+.star-cell:hover {
+  color: var(--accent-2);
+  transform: scale(1.18);
+}
+
+.star-cell:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--focus-ring);
+}
+
+.star-cell.is-have {
+  color: var(--accent);
+}
+
+.star-cell.is-gain {
+  color: var(--accent);
+  opacity: 0.4;
+}
+
+.star-cell.is-target {
+  color: var(--accent-2);
+}
+
+.star-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+
+.star-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.star-key {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.star-key--have {
+  background: var(--accent);
+}
+
+.star-key--gain {
+  background: var(--accent);
+  opacity: 0.4;
+}
+
+.star-hint {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--muted-2);
+}
+
+.star-inputs {
+  margin-top: 2px;
+}
+
+/* ── Radio groups (MVP / event) ────────────────────────── */
+.opt-group + .opt-group {
+  margin-top: 14px;
+}
+
+.radio-row {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.radio-col {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.radio-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+
+.radio-chip:hover {
+  border-color: var(--border-hover-strong);
+  color: var(--text);
+}
+
+.radio-chip em {
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+
+.radio-chip input[type="radio"] {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  border: 1px solid var(--border-hover-strong);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.radio-chip input[type="radio"]:checked {
+  border-color: var(--accent);
+  background:
+    radial-gradient(circle, var(--accent) 0 3.5px, transparent 3.5px);
+}
+
+.radio-chip:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--active-col-bg);
+  color: var(--text);
+}
+
+.radio-chip:has(input:checked) em {
+  color: var(--accent);
+}
+
+.radio-chip:focus-within {
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+/* ── Budget planner ────────────────────────────────────── */
+.opt-planner {
+  border-top: 1px solid var(--border-soft);
+  padding-bottom: 4px;
+}
+
+.opt-planner.hidden {
+  display: none;
+}
+
+.opt-slider {
+  gap: 2px;
+}
+
+.opt-slider-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.opt-slider-val {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+/* The one number the whole tab exists to produce. */
+.opt-odds {
+  padding: 4px 16px 0;
+}
+
+.odds-hero {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.odds-pct {
+  font-family: var(--mono);
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.odds-cap {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.odds-sub {
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.odds-moe {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+
+.opt-figure {
+  margin: 12px 0 0;
+  padding: 0 16px;
+}
+
+.opt-figcap {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.opt-figtitle {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.opt-figsub {
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+
+.opt-chart-wrap {
+  position: relative;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px;
+}
+
+.opt-curve {
+  display: block;
+  width: 100%;
+  height: 190px;
+}
+
+/* ── Diminishing-returns callout ───────────────────────── */
+.opt-knee {
+  padding: 12px 16px 0;
+}
+
+.knee-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 3px;
+  padding: 11px 13px;
+}
+
+.knee-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.knee-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.knee-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.knee-body {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+.knee-body strong {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.knee-verdict {
+  margin: 7px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--accent);
+}
+
+/* ── Budget ladder ─────────────────────────────────────── */
+.opt-ladder {
+  padding: 12px 16px 4px;
+}
+
+.ladder-table td:first-child {
+  font-family: var(--mono);
+}
+
+.ladder-have td {
+  color: var(--text);
+}
+
+.ladder-ok {
+  color: var(--accent);
+}
+
+.ladder-row--out td {
+  color: var(--muted-2);
+}
+
+@media (max-width: 560px) {
+  .eq-presets {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .radio-row {
+    grid-template-columns: 1fr;
+  }
+  .star-cell {
+    width: 17px;
+    height: 17px;
+  }
+}
+
+/* When spares, not meso, are the binding constraint. */
+.knee-ceiling {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.knee-ceiling strong {
+  font-family: var(--mono);
+  font-weight: 500;
+  color: var(--text);
+}

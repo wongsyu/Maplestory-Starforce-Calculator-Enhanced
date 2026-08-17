@@ -140,38 +140,65 @@
 				<form id="sf-form" class="form" novalidate>
 					<fieldset>
 						<div class="legend">Equipment</div>
-						<div class="row">
-							<label>
+						<!-- The numeric level still drives every cost formula; these buttons just
+						     write to it, so a player can pick "AbsoLab" instead of looking up 160. -->
+						<div class="eq-presets" id="eqPresets" role="radiogroup" aria-label="Equipment set"></div>
+						<div class="eq-custom-row">
+							<label class="eq-custom">
 								<span class="field-label">Item level</span>
-								<select id="itemLevel">
-									<option value="custom">Custom…</option>
-									<option value="120">120</option>
-									<option value="140">140</option>
-									<option value="150">150</option>
-									<option value="160">160</option>
-									<option value="200" selected>200</option>
-									<option value="250">250</option>
-								</select>
-								<input type="number" id="itemLevelCustom" min="1" max="300" value="200" hidden />
+								<input type="number" id="itemLevelCustom" min="1" max="300" value="200" />
 							</label>
-							<label>
-								<span class="field-label">Trials</span>
-								<select id="trials">
-									<option value="100">100</option>
-									<option value="500">500</option>
-									<option value="1000">1,000</option>
-									<option value="5000">5,000</option>
-									<option value="10000" selected>10,000</option>
-									<option value="50000">50,000</option>
-									<option value="100000">100,000</option>
-								</select>
-							</label>
+							<span class="eq-sets" id="eqSets" aria-live="polite"></span>
 						</div>
+						<input type="hidden" id="itemLevel" value="200" />
+					</fieldset>
+
+					<fieldset>
+						<div class="legend">Trials</div>
+						<div class="slider-field trials-field">
+							<input
+								type="range"
+								id="trialsSlider"
+								class="slider"
+								min="0"
+								max="6"
+								step="1"
+								value="4"
+								aria-label="Trials"
+								list="trialTicks"
+							/>
+							<datalist id="trialTicks">
+								<option value="0"></option><option value="1"></option><option value="2"></option>
+								<option value="3"></option><option value="4"></option><option value="5"></option>
+								<option value="6"></option>
+							</datalist>
+							<div class="slider-ticks trials-ticks" aria-hidden="true">
+								<span>100</span><span>500</span><span>1k</span><span>5k</span><span>10k</span
+								><span>50k</span><span>100k</span>
+							</div>
+							<div class="trials-readout">
+								<span class="trials-count" id="trialsCount">10,000 runs</span>
+								<span class="trials-moe" id="trialsMoe"></span>
+							</div>
+							<p class="trials-note" id="trialsNote"></p>
+						</div>
+						<input type="hidden" id="trials" value="10000" />
 					</fieldset>
 
 					<fieldset>
 						<div class="legend">Star range</div>
-						<div class="row">
+						<!-- Stars are drawn in the game's own 5-per-row grouping. Click sets the
+						     current star, shift-click (or click past it) sets the target; the
+						     number inputs stay for keyboard entry and remain the source of truth. -->
+						<div class="star-picker">
+							<div class="star-strip" id="starStrip" role="group" aria-label="Star range"></div>
+							<div class="star-legend">
+								<span><i class="star-key star-key--have"></i> have</span>
+								<span><i class="star-key star-key--gain"></i> to gain</span>
+								<span class="star-hint">click = current · shift-click = target</span>
+							</div>
+						</div>
+						<div class="row star-inputs">
 							<label>
 								<span class="field-label">Current ★</span>
 								<input type="number" id="currentStar" min="0" max="29" value="0" />
@@ -185,27 +212,56 @@
 
 					<fieldset>
 						<div class="legend">Modifiers</div>
-						<div class="row">
-							<label>
-								<span class="field-label">MVP discount <em class="hint">(up to 17★)</em></span>
-								<select id="mvp">
-									<option value="none">None</option>
-									<option value="silver">Silver — 3%</option>
-									<option value="gold">Gold — 5%</option>
-									<option value="diamond">Diamond — 10%</option>
-								</select>
-							</label>
-							<label>
-								<span class="field-label">Event</span>
-								<select id="event">
-									<option value="none">None</option>
-									<option value="fivetenfifteen">5 / 10 / 15★ guaranteed</option>
-									<option value="thirtyOff">30% off cost</option>
-									<option value="boomReduction">30% boom reduction</option>
-									<option value="shiningStarForce">Shining Star Force — 30% off + 30% boom red.</option>
-								</select>
-							</label>
+						<!-- Radio groups rather than selects: four MVP tiers and five events fit
+						     on screen at once, so the trade-offs are comparable without opening
+						     anything. The hidden inputs keep #mvp / #event readable as .value. -->
+						<div class="opt-group">
+							<span class="field-label">MVP discount <em class="hint">(up to 17★)</em></span>
+							<div class="radio-row" id="mvpRadios" role="radiogroup" aria-label="MVP discount">
+								<label class="radio-chip"
+									><input type="radio" name="mvpChoice" value="none" checked /><span>None</span></label
+								>
+								<label class="radio-chip"
+									><input type="radio" name="mvpChoice" value="silver" /><span>Silver <em>3%</em></span></label
+								>
+								<label class="radio-chip"
+									><input type="radio" name="mvpChoice" value="gold" /><span>Gold <em>5%</em></span></label
+								>
+								<label class="radio-chip"
+									><input type="radio" name="mvpChoice" value="diamond" /><span>Diamond <em>10%</em></span></label
+								>
+							</div>
 						</div>
+
+						<div class="opt-group">
+							<span class="field-label">Event</span>
+							<div class="radio-col" id="eventRadios" role="radiogroup" aria-label="Event">
+								<label class="radio-chip"
+									><input type="radio" name="eventChoice" value="none" checked /><span>None</span></label
+								>
+								<label class="radio-chip"
+									><input type="radio" name="eventChoice" value="fivetenfifteen" /><span
+										>5 / 10 / 15★ guaranteed</span
+									></label
+								>
+								<label class="radio-chip"
+									><input type="radio" name="eventChoice" value="thirtyOff" /><span>30% off cost</span></label
+								>
+								<label class="radio-chip"
+									><input type="radio" name="eventChoice" value="boomReduction" /><span
+										>30% boom reduction</span
+									></label
+								>
+								<label class="radio-chip"
+									><input type="radio" name="eventChoice" value="shiningStarForce" /><span
+										>Shining Star Force <em>30% off + 30% boom red.</em></span
+									></label
+								>
+							</div>
+						</div>
+
+						<input type="hidden" id="mvp" value="none" />
+						<input type="hidden" id="event" value="none" />
 
 						<div class="row" id="enhanceModeRow">
 							<div class="slider-field">
@@ -372,27 +428,79 @@
 							<span class="panel-unit">auto-fill the matrix</span>
 						</header>
 						<div class="panel-body opt-body">
-							<div class="opt-controls">
-								<label id="optBudgetField">
-									<span class="field-label">Meso budget <em class="hint">(billions)</em></span>
-									<input type="number" id="optBudget" min="0" step="1" value="50" />
-								</label>
-								<label id="optSparesField">
-									<span class="field-label">Spare items <em class="hint">(booms you can take)</em></span>
-									<input type="number" id="optSpares" min="0" step="1" value="0" />
-								</label>
-							</div>
 							<p class="opt-intro">
-								Finds the mode &amp; safeguard plan with the best chance of reaching your target for your meso budget
-								and spare count — searching every combination for stars 15–21 below your target, including the ones
-								you only revisit after a boom, then filling the Per-star matrix. Uses the modifiers (item level,
-								event, MVP, star catching) from the form on the left.
+								Finds the mode &amp; safeguard plan with the best chance of reaching your target — searching every
+								combination for stars 15–21 below your target, including the ones you only revisit after a boom, then
+								filling the Per-star matrix. Uses the modifiers (item level, event, MVP, star catching) from the form
+								on the left.
 							</p>
 							<div class="opt-actions">
 								<button type="button" id="optimizeBtn">Optimize</button>
 								<span id="optError" class="error" role="alert" aria-live="polite"></span>
 							</div>
+
+							<!-- Sliders stay hidden until a run exists: their useful range depends on the
+							     cost distribution, which we only know once the plans have been sampled. -->
+							<div class="opt-planner hidden" id="optPlanner">
+								<div class="opt-controls">
+									<div class="slider-field opt-slider">
+										<div class="opt-slider-head">
+											<span class="field-label">Meso budget</span>
+											<span class="opt-slider-val" id="optBudgetVal">50 B</span>
+										</div>
+										<input
+											type="range"
+											id="optBudgetSlider"
+											class="slider"
+											min="0"
+											max="100"
+											step="1"
+											value="50"
+											aria-label="Meso budget"
+										/>
+										<div class="slider-ticks" id="optBudgetTicks" aria-hidden="true"></div>
+									</div>
+									<div class="slider-field opt-slider">
+										<div class="opt-slider-head">
+											<span class="field-label">Spare items <em class="hint">(booms you can take)</em></span>
+											<span class="opt-slider-val" id="optSparesVal">0</span>
+										</div>
+										<input
+											type="range"
+											id="optSparesSlider"
+											class="slider"
+											min="0"
+											max="8"
+											step="1"
+											value="0"
+											aria-label="Spare items"
+										/>
+										<div class="slider-ticks" id="optSparesTicks" aria-hidden="true">
+											<span>0</span><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span
+											><span>6</span><span>7</span><span>8</span>
+										</div>
+									</div>
+								</div>
+
+								<div class="opt-odds" id="optOdds"></div>
+
+								<figure class="opt-figure">
+									<figcaption class="opt-figcap">
+										<span class="opt-figtitle">Finish odds by budget</span>
+										<span class="opt-figsub" id="optCurveSub">best plan at each budget</span>
+									</figcaption>
+									<div class="chart-wrap opt-chart-wrap">
+										<canvas id="optCurve" class="opt-curve" height="190"></canvas>
+									</div>
+								</figure>
+
+								<div id="optKnee" class="opt-knee"></div>
+								<div id="optLadder" class="opt-ladder"></div>
+							</div>
+
 							<div id="optResult" class="opt-result hidden" aria-live="polite"></div>
+							<input type="hidden" id="optBudget" value="50" />
+							<input type="hidden" id="optSpares" value="0" />
 						</div>
 					</article>
 				</section>
@@ -562,6 +670,7 @@
 		</main>
 
 		<script src="rates.js"></script>
+		<script src="equipment.js"></script>
 		<script src="simulator.js"></script>
 		<script src="optimizer.js"></script>
 		<script src="fodder.js"></script>

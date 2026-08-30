@@ -5,10 +5,13 @@ Read this first; it's the fastest path to context.
 
 ## What this is
 
-A fork of [AngeloTadeucci/starforcing-calc](https://github.com/AngeloTadeucci/starforcing-calc),
-extended with an equipment/star-range UI overhaul and a budget planner.
+Derived from [AngeloTadeucci/starforcing-calc](https://github.com/AngeloTadeucci/starforcing-calc),
+extended with an equipment/star-range UI overhaul and a budget planner. Note it is
+*not* a GitHub fork — the code was copied into a standalone repo. That distinction
+matters legally; see "Open question" below.
 
-- **Upstream:** `AngeloTadeucci/starforcing-calc` (added as the `upstream` remote)
+- **Upstream:** `AngeloTadeucci/starforcing-calc` (not configured as a remote — add
+  it with the snippet below if you want to pull their fixes)
 - **Our branch:** `claude/review-and-continue-tqmg1u`
 - **Attribution:** the footer credits upstream, MathBro/serverDiffs, StrategyWiki,
   and contributors. Upstream ships **no LICENSE file** — see "Open question" below.
@@ -139,13 +142,21 @@ was not needed: measured error is now well under the rate data's own uncertainty
 
 ## Open question: licensing
 
-Upstream has **no LICENSE file**, which legally means all rights reserved. GitHub's
-ToS §D.5 covers forking and modifying *on GitHub*, which is what we're doing.
-Hosting the result off GitHub (own VPS, Vercel) is not covered by anything.
+Upstream has **no LICENSE file**, which legally means all rights reserved.
 
-The fix is a 30-second ask: open an issue on upstream requesting an MIT license.
-Until then, keep the fork relationship and attribution visible, and don't publish
-to an independent host.
+An earlier draft of this section leaned on GitHub's ToS §D.5, which permits forking
+and modifying *on GitHub*. **That does not apply here.** The GitHub API reports
+`"fork": false` — this repo was created standalone with upstream's code copied in,
+not forked through GitHub, so the §D.5 permission was never granted. The repo is
+also public. Nothing about that is fatal, but the position is weaker than the
+earlier note claimed, and it is worth knowing which of the two situations you are
+actually in.
+
+The fix is unchanged and still a 30-second ask: open an issue on upstream
+requesting an MIT license. Until then, keep attribution visible, and don't publish
+to an independent host. If you want the ToS §D.5 cover in the meantime, the way to
+get it is to fork upstream through GitHub properly and re-point this work at that
+fork.
 
 ## Conventions
 
